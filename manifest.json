@@ -1,0 +1,9 @@
+{
+    "id": "proton-drive-sync",
+    "name": "Proton Drive Sync",
+    "version": "0.1.0",
+    "minAppVersion": "1.5.0",
+    "description": "End-to-end encrypted bidirectional sync of your vault with Proton Drive, with three-way conflict remediation for offline edits.",
+    "author": "maez",
+    "isDesktopOnly": true
+}

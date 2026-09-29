@@ -1,0 +1,46 @@
+/* Status bar */
+
+.proton-drive-sync-icon {
+    display: inline-flex;
+    vertical-align: middle;
+}
+
+.proton-drive-sync-icon.proton-drive-sync-spin svg {
+    animation: proton-drive-sync-rotate 1.4s linear infinite;
+}
+
+@keyframes proton-drive-sync-rotate {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Respect the reduced-motion preference: the spinner is decorative, and the
+   status bar text already says the sync is running. */
+@media (prefers-reduced-motion: reduce) {
+    .proton-drive-sync-icon.proton-drive-sync-spin svg {
+        animation: none;
+    }
+}
+
+/* Folder picker */
+
+.proton-drive-sync-breadcrumb {
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+    margin-top: 0;
+}
+
+/* Settings: recent activity */
+
+.proton-drive-sync-log {
+    max-height: 16em;
+    overflow: auto;
+    padding: var(--size-4-2);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    background-color: var(--background-secondary);
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+    white-space: pre;
+}
