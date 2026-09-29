@@ -40,7 +40,13 @@ try {
         alias: { obsidian: path.resolve('tests/stubs/obsidian.ts') },
     });
 
-    const result = spawnSync(process.execPath, ['--test', outDir], { stdio: 'inherit' });
+    // The compiled files are listed one by one: how `--test` treats a
+    // directory argument differs between Node versions, and on Node 24 it is
+    // loaded as a single module and fails.
+    const compiled = readdirSync(outDir)
+        .filter((file) => file.endsWith('.test.cjs'))
+        .map((file) => path.join(outDir, file));
+    const result = spawnSync(process.execPath, ['--test', ...compiled], { stdio: 'inherit' });
     process.exit(result.status ?? 1);
 } finally {
     rmSync(outDir, { recursive: true, force: true });
