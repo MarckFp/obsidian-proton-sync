@@ -1,4 +1,4 @@
-import { ALWAYS_EXCLUDED } from '../settings';
+import { ALWAYS_EXCLUDED, configExclusions } from '../settings';
 
 /**
  * Path handling for the vault side of the sync.
@@ -35,6 +35,16 @@ export function ancestorPaths(path: string): string[] {
     return ancestors;
 }
 
+/** True when `path` is `folder` itself or anything below it. */
+export function isWithin(path: string, folder: string): boolean {
+    return folder === '' || path === folder || path.startsWith(`${folder}/`);
+}
+
+/** Re-root a path that sits within `fromFolder` under `toFolder` instead. */
+export function replacePrefix(path: string, fromFolder: string, toFolder: string): string {
+    return path === fromFolder ? toFolder : `${toFolder}${path.slice(fromFolder.length)}`;
+}
+
 export function splitExtension(path: string): { stem: string; extension: string } {
     const name = basename(path);
     const dot = name.lastIndexOf('.');
@@ -53,12 +63,26 @@ export function splitExtension(path: string): { stem: string; extension: string 
 export class PathFilter {
     private readonly matchers: RegExp[];
 
-    constructor(userPatterns: string[], syncObsidianConfig: boolean) {
-        const patterns = [...ALWAYS_EXCLUDED, ...userPatterns.map((p) => p.trim()).filter(Boolean)];
+    constructor(
+        userPatterns: string[],
+        syncObsidianConfig: boolean,
+        private readonly configDir = '.obsidian',
+        pluginDir: string | null = null,
+    ) {
+        const patterns = [
+            ...ALWAYS_EXCLUDED,
+            ...configExclusions(configDir, pluginDir),
+            ...userPatterns.map((p) => p.trim()).filter(Boolean),
+        ];
         if (!syncObsidianConfig) {
-            patterns.push('.obsidian/**', '.obsidian');
+            patterns.push(`${configDir}/**`, configDir);
         }
         this.matchers = patterns.map(globToRegExp);
+    }
+
+    /** Whether the path lives in the vault's config folder. */
+    isConfigPath(path: string): boolean {
+        return path === this.configDir || path.startsWith(`${this.configDir}/`);
     }
 
     isExcluded(path: string): boolean {

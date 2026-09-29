@@ -82,6 +82,22 @@ describe('SyncState — records', () => {
         assert.equal(state.getByNodeUid('node-1')?.path, 'new.md');
     });
 
+    it('moves a folder and everything recorded inside it, and nothing beside it', async () => {
+        const { state } = await loadedState();
+        state.setSynced('Projects', 'folder-1', 'folder');
+        state.setSynced('Projects/a.md', 'node-1', 'file', base('hash-a'));
+        state.setSynced('Projects/deep/b.md', 'node-2', 'file', base('hash-b'));
+        state.setSynced('Projects old/c.md', 'node-3', 'file', base('hash-c'));
+        state.setConflict('Projects/a.md', { detectedAt: 1, reason: 'both-modified' });
+
+        state.renameFolder('Projects', 'Work');
+
+        assert.deepEqual(state.paths().sort(), ['Projects old/c.md', 'Work', 'Work/a.md', 'Work/deep/b.md']);
+        assert.equal(state.getByNodeUid('node-2')?.path, 'Work/deep/b.md');
+        assert.equal(state.isConflicted('Work/a.md'), true);
+        assert.equal(state.isConflicted('Projects/a.md'), false);
+    });
+
     it('forgets a deleted record on both lookups', async () => {
         const { state } = await loadedState();
         state.setSynced('note.md', 'node-1', 'file', base('hash-a'));

@@ -12,7 +12,7 @@ export class PathBatcher {
     private firstQueuedAt = 0;
 
     constructor(
-        private readonly delayMs: number,
+        private delayMs: number,
         private readonly maxWaitMs: number,
         private readonly onFlush: (paths: string[]) => void,
     ) {}
@@ -23,6 +23,25 @@ export class PathBatcher {
         }
         this.pending.add(path);
         this.schedule();
+    }
+
+    /** Change the quiet period; takes effect from the next path added. */
+    setDelay(delayMs: number): void {
+        this.delayMs = delayMs;
+    }
+
+    /**
+     * Carry pending paths along with a rename, so a file renamed while it waits
+     * is synced under its new name rather than looked up under one that no
+     * longer exists.
+     */
+    rename(fromPath: string, toPath: string): void {
+        for (const path of [...this.pending]) {
+            if (path === fromPath || path.startsWith(`${fromPath}/`)) {
+                this.pending.delete(path);
+                this.pending.add(`${toPath}${path.slice(fromPath.length)}`);
+            }
+        }
     }
 
     /** Hand over whatever is pending right now. */

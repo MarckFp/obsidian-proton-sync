@@ -1,6 +1,7 @@
 import type { DataAdapter } from 'obsidian';
 
 import type { Logger } from '../util/logger';
+import { isWithin, replacePrefix } from './paths';
 import type { ConflictInfo, SyncBase, SyncRecord } from './types';
 
 const STATE_VERSION = 1;
@@ -159,7 +160,11 @@ export class SyncState {
             return;
         }
         this.records.delete(path);
-        this.nodeUidToPath.delete(record.nodeUid);
+        // State written by older versions can hold two records for one node;
+        // dropping one must not orphan the other's lookup.
+        if (this.nodeUidToPath.get(record.nodeUid) === path) {
+            this.nodeUidToPath.delete(record.nodeUid);
+        }
         this.markDirty();
     }
 
@@ -180,6 +185,28 @@ export class SyncState {
             this.unresolvedConflicts.set(toPath, conflict);
         }
         this.markDirty();
+    }
+
+    /**
+     * Move a folder's record and everything recorded beneath it.
+     *
+     * A folder rename is one operation on Drive, so it has to be one operation
+     * here too; renaming the children one by one would leave a window where
+     * some records point into a folder that no longer exists under that name.
+     */
+    renameFolder(fromPath: string, toPath: string): void {
+        const moved = [...this.records.keys()].filter((path) => isWithin(path, fromPath));
+        for (const path of moved) {
+            this.rename(path, replacePrefix(path, fromPath, toPath));
+        }
+        for (const path of [...this.unresolvedConflicts.keys()]) {
+            if (isWithin(path, fromPath)) {
+                const conflict = this.unresolvedConflicts.get(path)!;
+                this.unresolvedConflicts.delete(path);
+                this.unresolvedConflicts.set(replacePrefix(path, fromPath, toPath), conflict);
+                this.markDirty();
+            }
+        }
     }
 
     getEventCursor(treeEventScopeId: string): string | null {

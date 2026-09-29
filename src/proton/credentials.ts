@@ -2,7 +2,7 @@ import type { DataAdapter } from 'obsidian';
 
 import type { Logger } from '../util/logger';
 import type { SessionCredentials, SessionInfo } from './account';
-import type { SecretStore } from './secretStore';
+import type { SecretSlot } from './secretStore';
 
 type StoredSession = {
     version: 1;
@@ -14,28 +14,28 @@ type StoredSession = {
     accountEmail?: string;
 };
 
-type SessionFile = { encrypted: true; payload: string } | { encrypted: false; payload: StoredSession };
+/** Where 0.1.0 kept the session, and how to read it back. */
+export type LegacySessionFile = {
+    adapter: DataAdapter;
+    path: string;
+    decrypt: (base64CipherText: string) => string | null;
+};
 
 /**
- * The plugin's `SessionCredentials`, backed by a file next to the plugin.
+ * The plugin's `SessionCredentials`, kept in a {@link SecretSlot}.
  *
  * Kept out of `data.json` on purpose. Settings are saved on every change and
- * are fair game for a user to inspect, copy between machines or commit; a
- * session is none of those things, and giving it its own file means signing out
- * can delete it outright rather than having to scrub a shared document.
- *
- * Nothing is written unless {@link SecretStore} can encrypt it. Falling back to
- * plaintext would put an access token and the user's key password inside the
- * vault directory, which is exactly the thing this plugin then uploads.
+ * are fair game for a user to inspect or copy between machines; a session is
+ * neither, and it belongs to one device. Keeping it outside the vault also
+ * means a copied or synced vault never carries anyone's sign-in along.
  */
 export class Credentials implements SessionCredentials {
     private session: StoredSession | null = null;
     private readonly listeners = new Set<() => void>();
 
     constructor(
-        private readonly adapter: DataAdapter,
-        private readonly filePath: string,
-        private readonly secretStore: SecretStore,
+        private readonly slot: SecretSlot,
+        private readonly legacy: LegacySessionFile,
         private readonly logger: Logger,
     ) {}
 
@@ -72,31 +72,19 @@ export class Credentials implements SessionCredentials {
     }
 
     async load(): Promise<void> {
-        if (!(await this.adapter.exists(this.filePath))) {
-            this.session = null;
+        this.session = null;
+        let stored = this.slot.read();
+        if (stored === null) {
+            stored = await this.migrateLegacyFile();
+        }
+        if (stored === null) {
             return;
         }
-
         try {
-            const file = JSON.parse(await this.adapter.read(this.filePath)) as SessionFile;
-            if (!file.encrypted) {
-                // Only reachable for a file this plugin did not write. Refuse it
-                // rather than adopt a session of unknown provenance.
-                this.logger.warn('Stored session is not encrypted; ignoring it');
-                this.session = null;
-                return;
-            }
-
-            const decrypted = this.secretStore.decrypt(file.payload);
-            if (decrypted === null) {
-                this.session = null;
-                return;
-            }
-            this.session = JSON.parse(decrypted) as StoredSession;
+            this.session = JSON.parse(stored) as StoredSession;
             this.logger.debug('Loaded stored Proton session');
         } catch (error) {
             this.logger.error('Failed to read the stored session', error);
-            this.session = null;
         }
     }
 
@@ -145,32 +133,67 @@ export class Credentials implements SessionCredentials {
 
     async signOut(): Promise<void> {
         this.session = null;
-        try {
-            if (await this.adapter.exists(this.filePath)) {
-                await this.adapter.remove(this.filePath);
-            }
-        } catch (error) {
-            this.logger.error('Failed to remove the stored session', error);
-        }
+        this.slot.write(null);
+        await this.removeLegacyFile();
         this.emitChanged();
     }
 
     private async persist(): Promise<void> {
-        if (!this.session) {
-            return;
+        if (this.session) {
+            this.slot.write(JSON.stringify(this.session));
+            // A new session supersedes one an older version left behind.
+            await this.removeLegacyFile();
+        }
+    }
+
+    /**
+     * Move a session saved by 0.1.0 into the slot.
+     *
+     * The old file is deleted once migrated, or when it is not something this
+     * plugin wrote. It is kept when decryption merely failed: on Linux the
+     * keyring is often still locked early in a login, and deleting the file
+     * then would sign the user out for good over a timing accident.
+     */
+    private async migrateLegacyFile(): Promise<string | null> {
+        const { adapter, path, decrypt } = this.legacy;
+        let file: { encrypted?: boolean; payload?: unknown };
+        try {
+            if (!(await adapter.exists(path))) {
+                return null;
+            }
+            file = JSON.parse(await adapter.read(path)) as typeof file;
+        } catch (error) {
+            this.logger.warn('Discarding an unreadable session file left by an older version', error);
+            await this.removeLegacyFile();
+            return null;
+        }
+        if (file.encrypted !== true || typeof file.payload !== 'string') {
+            // Only reachable for a file this plugin did not write. Refuse it
+            // rather than adopt a session of unknown provenance.
+            this.logger.warn('Stored session is not encrypted; ignoring it');
+            await this.removeLegacyFile();
+            return null;
         }
 
-        const encrypted = this.secretStore.encrypt(JSON.stringify(this.session));
-        if (encrypted === null) {
-            // The session stays usable for this Obsidian session; it just will
-            // not survive a restart. Signing in again is a far better outcome
-            // than leaving key material in the vault.
-            this.logger.warn('Session not persisted: no OS-backed encryption is available');
-            return;
+        const decrypted = decrypt(file.payload);
+        if (decrypted === null) {
+            this.logger.warn('Could not decrypt the session saved by an older version; will try again next launch');
+            return null;
         }
+        this.slot.write(decrypted);
+        await this.removeLegacyFile();
+        this.logger.info('Moved the stored Proton session into Obsidian’s secret storage');
+        return decrypted;
+    }
 
-        const file: SessionFile = { encrypted: true, payload: encrypted };
-        await this.adapter.write(this.filePath, JSON.stringify(file));
+    private async removeLegacyFile(): Promise<void> {
+        try {
+            if (await this.legacy.adapter.exists(this.legacy.path)) {
+                await this.legacy.adapter.remove(this.legacy.path);
+            }
+        } catch (error) {
+            this.logger.warn('Failed to remove the old session file', error);
+        }
     }
 
     private emitChanged(): void {

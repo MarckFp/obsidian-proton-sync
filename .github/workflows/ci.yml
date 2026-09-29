@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The plugin runs on every desktop OS, and the tests exercise real
+        # filesystem paths, so each one gets a run.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  build:
+    name: Type-check and build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `build` runs `tsc --noEmit` first, so this covers the type-check too.
+      - name: Build plugin
+        run: npm run build
+
+      - name: Check that the bundle loads without Node built-ins
+        # Obsidian mobile has no Node, and a bare `require` of a Node built-in
+        # runs when the plugin loads. The plugin's own desktop-only uses go
+        # through `window.require` behind a platform check, which this allows.
+        run: |
+          if grep -qE '(^|[^.])require\("(node:)?(fs|crypto|os|path|stream|buffer|util|electron)"\)' main.js; then
+            echo "main.js requires a Node built-in at load time; it would fail on mobile." >&2
+            exit 1
+          fi

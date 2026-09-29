@@ -6,9 +6,6 @@ export type PluginSettings = {
     remoteFolderUid: string | null;
     /** Human-readable path of that folder, for display only. */
     remoteFolderPath: string | null;
-    /** Account the stored session belongs to; shown in settings, and used to
-     *  detect that the session now belongs to someone else. */
-    accountEmail: string | null;
 
     conflictPolicy: ConflictPolicy;
     /** Keeps the losing side as a sibling file under `prefer-*` policies too. */
@@ -41,30 +38,20 @@ export type PluginSettings = {
 
     /** Names the device in conflict copies and in the sync log. */
     deviceName: string;
-    /**
-     * Stable per-installation id, handed to the SDK.
-     *
-     * Drive marks an in-progress upload with the uid of the client that started
-     * it. Keeping ours stable lets the SDK recognise a draft this installation
-     * abandoned - after a crash, say - and clean it up on its own, instead of
-     * stopping to ask whether another device's upload may be overwritten.
-     */
-    clientUid: string;
     logLevel: LogLevel;
+
+    /** Set once the first-run setup has been shown, so it never reappears. */
+    onboardingComplete: boolean;
 };
 
 /**
  * Files that should never leave the device, regardless of user configuration.
  *
- * `workspace.json` and friends record which panes are open and where; syncing
- * them makes two devices fight over each other's layout on every focus change.
- * The rest are editor scratch files and OS droppings.
+ * Editor scratch files and OS droppings. The config-folder exclusions depend
+ * on where the vault keeps its config, so they are built by
+ * {@link configExclusions}.
  */
 export const ALWAYS_EXCLUDED = [
-    '.obsidian/workspace.json',
-    '.obsidian/workspace-mobile.json',
-    '.obsidian/workspace',
-    '.obsidian/cache',
     '.trash/**',
     '.git/**',
     '.DS_Store',
@@ -74,10 +61,34 @@ export const ALWAYS_EXCLUDED = [
     '**/~$*',
 ];
 
+/**
+ * Files inside the config folder that stay on the device even when the rest of
+ * it is synced.
+ *
+ * `workspace.json` and friends record which panes are open and where; syncing
+ * them makes two devices fight over each other's layout on every focus change.
+ * This plugin's own files are per-device by nature: the sync state is this
+ * device's merge base and `data.json` carries its device name. `session.json`
+ * is where 0.1.0 kept the sign-in; it is migrated away on load, but a device
+ * still on 0.1.0 may have one. Syncing any of them would make every device
+ * impersonate the last one to write.
+ */
+export function configExclusions(configDir: string, pluginDir: string | null): string[] {
+    const patterns = [
+        `${configDir}/workspace.json`,
+        `${configDir}/workspace-mobile.json`,
+        `${configDir}/workspace`,
+        `${configDir}/cache`,
+    ];
+    if (pluginDir) {
+        patterns.push(`${pluginDir}/data.json`, `${pluginDir}/session.json`, `${pluginDir}/sync-state.json`);
+    }
+    return patterns;
+}
+
 export const DEFAULT_SETTINGS: PluginSettings = {
     remoteFolderUid: null,
     remoteFolderPath: null,
-    accountEmail: null,
 
     conflictPolicy: 'keep-both',
     keepConflictCopies: true,
@@ -90,11 +101,12 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 
     maxFileSizeMb: 0,
     excludePatterns: [],
-    syncObsidianConfig: false,
+    syncObsidianConfig: true,
 
     deviceName: '',
-    clientUid: '',
     logLevel: 'info',
+
+    onboardingComplete: false,
 };
 
 /** Lower bound on the poll interval, to keep the account out of rate limiting. */

@@ -47,3 +47,15 @@ export class TFolder {}
 export class TAbstractFile {}
 export function setIcon(): void {}
 export function setTooltip(): void {}
+
+/**
+ * The tests run under Node, which is what a desktop app has too, so the stub
+ * reports desktop. Mutable so a test can pretend to be mobile.
+ */
+export const Platform = {
+    isDesktopApp: true,
+    isMobile: false,
+    isIosApp: false,
+    isAndroidApp: false,
+    isTablet: false,
+};

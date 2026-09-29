@@ -2,14 +2,11 @@ import { CryptoProxy } from '@protontech/crypto';
 import { Api as CryptoApi } from '@protontech/crypto/proxy/endpoint/api.ts';
 import { computeKeyPassword, generateKeySalt, getRandomSrpVerifier, getSrp } from '@protontech/crypto/srp';
 import { MemoryCache, OpenPGPCryptoWithCryptoProxy, ProtonDriveClient } from '@protontech/drive-sdk';
-import type { DataAdapter } from 'obsidian';
-
 import type { Logger } from '../util/logger';
 import { ApiClient, initAccount, type Addresses, type Auth, type Srp } from './account';
-import { Credentials } from './credentials';
+import type { Credentials } from './credentials';
 import { HTTPClient } from './httpClient';
 import { obsidianFetch } from './obsidianFetch';
-import { SecretStore } from './secretStore';
 import { Telemetry } from './telemetry';
 
 /**
@@ -61,7 +58,6 @@ export type SignInHandle = {
  * needs address keys to decrypt anything.
  */
 export class ProtonSession {
-    private readonly credentials: Credentials;
     private readonly telemetry: Telemetry;
 
     private apiClient: ApiClient | null = null;
@@ -71,12 +67,10 @@ export class ProtonSession {
     private client: ProtonDriveClient | null = null;
 
     constructor(
-        adapter: DataAdapter,
-        sessionFilePath: string,
+        private readonly credentials: Credentials,
         private readonly clientUid: string,
         private readonly logger: Logger,
     ) {
-        this.credentials = new Credentials(adapter, sessionFilePath, new SecretStore(logger), logger);
         this.telemetry = new Telemetry(logger);
     }
 

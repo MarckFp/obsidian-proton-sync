@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
+import { App, debounce, Notice, PluginSettingTab, Setting } from 'obsidian';
 
 import type ProtonDriveSyncPlugin from '../main';
 import { MIN_POLL_SECONDS } from '../settings';
@@ -80,8 +80,6 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                 if (signedIn) {
                     button.setButtonText('Sign out').onClick(async () => {
                         await this.plugin.session.signOut();
-                        this.plugin.settings.accountEmail = null;
-                        await this.plugin.saveSettings();
                         await this.plugin.reconnect();
                         this.display();
                     });
@@ -92,11 +90,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                     .setCta()
                     .onClick(() => {
                         new SignInModal(this.app, this.plugin, () => {
-                            this.plugin.settings.accountEmail = this.plugin.session.accountEmail ?? null;
-                            void this.plugin
-                                .saveSettings()
-                                .then(() => this.plugin.reconnect())
-                                .then(() => this.display());
+                            void this.plugin.onSignedIn().then(() => this.display());
                         }).open();
                     });
             });
@@ -129,18 +123,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                             return;
                         }
                         new FolderPickerModal(this.app, this.plugin.session.getClient(), async (folder) => {
-                            const changed = folder.uid !== this.plugin.settings.remoteFolderUid;
-                            this.plugin.settings.remoteFolderUid = folder.uid;
-                            this.plugin.settings.remoteFolderPath = folder.path;
-                            await this.plugin.saveSettings();
-
-                            if (changed) {
-                                // The sync state describes the old folder, and
-                                // reconciling against a different tree with it
-                                // would read as mass deletions on both sides.
-                                await this.plugin.state.reset();
-                            }
-                            await this.plugin.reconnect();
+                            await this.plugin.setRemoteFolder(folder);
                             this.display();
                         }).open();
                     }),
@@ -210,6 +193,10 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
             .setDesc('Compare everything against Drive right away.')
             .addButton((button) =>
                 button.setButtonText('Sync now').onClick(async () => {
+                    if (!this.plugin.isConfigured()) {
+                        new Notice('Proton Drive Sync: sign in and choose a Drive folder first.');
+                        return;
+                    }
                     await this.plugin.engine.syncNow();
                     new Notice('Proton Drive Sync: finished.');
                 }),
@@ -264,14 +251,21 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
 
     // -- scope -------------------------------------------------------------
 
+    /**
+     * Saved once typing pauses. A changed exclusion list starts a full sync,
+     * and saving on every keystroke would queue one per character.
+     */
+    private readonly saveExclusions = debounce(() => void this.plugin.saveSettings(), 1000, true);
+
     private renderScope(containerEl: HTMLElement): void {
         new Setting(containerEl).setName('What gets synced').setHeading();
 
         new Setting(containerEl)
             .setName('Sync Obsidian settings')
             .setDesc(
-                'Include the .obsidian folder — appearance, hotkeys, installed plugins. ' +
-                    'Pane layouts and caches are always left out, because devices fight over them.',
+                `Include the ${this.app.vault.configDir} folder — appearance, hotkeys, installed plugins. ` +
+                    'Pane layouts, caches and this plugin’s sign-in are always left out, because they belong ' +
+                    'to each device. Changes there are picked up at every check for Drive changes.',
             )
             .addToggle((toggle) =>
                 toggle.setValue(this.plugin.settings.syncObsidianConfig).onChange(async (value) => {
@@ -290,12 +284,12 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                 text
                     .setValue(this.plugin.settings.excludePatterns.join('\n'))
                     .setPlaceholder('Private/\n**/*.pdf')
-                    .onChange(async (value) => {
+                    .onChange((value) => {
                         this.plugin.settings.excludePatterns = value
                             .split('\n')
                             .map((line) => line.trim())
                             .filter(Boolean);
-                        await this.plugin.saveSettings();
+                        this.saveExclusions();
                     }),
             );
 
@@ -364,8 +358,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                     .setButtonText('Rebuild')
                     .setWarning()
                     .onClick(async () => {
-                        await this.plugin.state.reset();
-                        await this.plugin.reconnect();
+                        await this.plugin.rebuildState();
                         new Notice('Proton Drive Sync: sync state rebuilt.');
                     }),
             );

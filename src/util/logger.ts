@@ -20,7 +20,6 @@ export class Logger {
     private static readonly BUFFER_SIZE = 500;
 
     private readonly buffer: LogEntry[] = [];
-    private readonly listeners = new Set<(entry: LogEntry) => void>();
 
     constructor(
         private minLevel: LogLevel = 'info',
@@ -38,12 +37,6 @@ export class Logger {
         if (this.root) {
             this.root.setLevel(level);
         }
-    }
-
-    onEntry(listener: (entry: LogEntry) => void): () => void {
-        const target = this.root ?? this;
-        target.listeners.add(listener);
-        return () => target.listeners.delete(listener);
     }
 
     getEntries(): readonly LogEntry[] {
@@ -76,9 +69,6 @@ export class Logger {
         target.buffer.push(entry);
         if (target.buffer.length > Logger.BUFFER_SIZE) {
             target.buffer.splice(0, target.buffer.length - Logger.BUFFER_SIZE);
-        }
-        for (const listener of target.listeners) {
-            listener(entry);
         }
 
         const prefix = `[${this.scope}]`;

@@ -1,5 +1,6 @@
 import type { Logger } from '../util/logger';
 import type { DriveIO } from './drive';
+import { mediaTypeOf } from './media';
 import { mergeThreeWay } from './merge';
 import { conflictCopyPath } from './paths';
 import type { ConflictPolicy, ConflictReason, LocalState, RemoteState, SyncBase } from './types';
@@ -140,8 +141,8 @@ export class ConflictResolver {
      * and the caller keeps both copies instead.
      */
     private async tryMerge(context: ConflictContext): Promise<Resolution | null> {
-        const { base, remote, path } = context;
-        if (!base || !remote) {
+        const { base, local, remote, path } = context;
+        if (!base || !remote || !isMergeable(path, local, remote)) {
             return null;
         }
 
@@ -184,6 +185,20 @@ export class ConflictResolver {
             copyPath: conflictCopyPath(context.path, this.options.deviceName, this.now()),
         };
     }
+}
+
+/** Above this, a merge is declined before anything is downloaded. */
+const MAX_MERGE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Only text is worth fetching two revisions of to attempt a merge. An image or
+ * a video would be downloaded twice, decoded as text, and declined anyway.
+ */
+function isMergeable(path: string, local: LocalState | undefined, remote: RemoteState): boolean {
+    const mediaType = mediaTypeOf(path);
+    const isText =
+        mediaType.startsWith('text/') || mediaType === 'application/json' || mediaType === 'application/xml';
+    return isText && (local?.size ?? 0) <= MAX_MERGE_BYTES && (remote.size ?? 0) <= MAX_MERGE_BYTES;
 }
 
 function decodeUtf8(data: ArrayBuffer): string {

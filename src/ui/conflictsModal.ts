@@ -74,28 +74,14 @@ export class ConflictsModal extends Modal {
             );
     }
 
-    /**
-     * Apply one decision.
-     *
-     * The choice is applied by clearing the conflict flag and re-running the
-     * normal sync for just that path with a temporary policy, rather than by a
-     * separate code path — so a manual resolution goes through exactly the
-     * checks and the ordering that an automatic one does.
-     */
+    /** Apply one decision, to this file only; see `SyncEngine.resolveConflict`. */
     private async resolve(path: string, policy: 'keep-both' | 'prefer-local' | 'prefer-remote'): Promise<void> {
-        const original = this.plugin.settings.conflictPolicy;
         try {
-            this.plugin.state.clearConflict(path);
-            this.plugin.settings.conflictPolicy = policy;
-            this.plugin.engine.updateSettings(this.plugin.settings);
-
-            await this.plugin.engine.syncPath(path);
+            await this.plugin.engine.resolveConflict(path, policy);
             new Notice(`Resolved "${path}".`);
         } catch (error) {
             new Notice(`Could not resolve "${path}": ${error instanceof Error ? error.message : String(error)}`);
         } finally {
-            this.plugin.settings.conflictPolicy = original;
-            this.plugin.engine.updateSettings(this.plugin.settings);
             this.render();
         }
     }

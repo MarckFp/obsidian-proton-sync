@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { PathFilter, ancestorPaths, conflictCopyPath, splitExtension } from '../src/sync/paths';
+import { mediaTypeOf } from '../src/sync/media';
+import {
+    PathFilter,
+    ancestorPaths,
+    conflictCopyPath,
+    isWithin,
+    replacePrefix,
+    splitExtension,
+} from '../src/sync/paths';
 
 describe('PathFilter — built-in exclusions', () => {
     const filter = new PathFilter([], true);
@@ -26,6 +34,29 @@ describe('PathFilter — built-in exclusions', () => {
     it('keeps ordinary notes and attachments', () => {
         assert.equal(filter.isExcluded('Daily/2026-09-18.md'), false);
         assert.equal(filter.isExcluded('attachments/diagram.png'), false);
+    });
+});
+
+describe('PathFilter — the config folder', () => {
+    const filter = new PathFilter([], true, '.obsidian', '.obsidian/plugins/proton-drive-sync');
+
+    it('never syncs this plugin’s per-device files', () => {
+        assert.equal(filter.isExcluded('.obsidian/plugins/proton-drive-sync/data.json'), true);
+        assert.equal(filter.isExcluded('.obsidian/plugins/proton-drive-sync/session.json'), true);
+        assert.equal(filter.isExcluded('.obsidian/plugins/proton-drive-sync/sync-state.json'), true);
+    });
+
+    it('still syncs the plugin’s code, and other plugins’ settings', () => {
+        assert.equal(filter.isExcluded('.obsidian/plugins/proton-drive-sync/main.js'), false);
+        assert.equal(filter.isExcluded('.obsidian/plugins/dataview/data.json'), false);
+    });
+
+    it('follows a vault that keeps its config somewhere else', () => {
+        const custom = new PathFilter([], true, '.config');
+        assert.equal(custom.isExcluded('.config/workspace.json'), true);
+        assert.equal(custom.isExcluded('.obsidian/workspace.json'), false);
+        assert.equal(custom.isConfigPath('.config/app.json'), true);
+        assert.equal(custom.isConfigPath('.configured/app.json'), false);
     });
 });
 
@@ -103,5 +134,33 @@ describe('conflictCopyPath', () => {
             conflictCopyPath('note.md', 'work/laptop:1', when),
             'note (conflict 2026-09-18 1431 from work-laptop-1).md',
         );
+    });
+});
+
+describe('isWithin / replacePrefix', () => {
+    it('matches a folder and what is inside it, not siblings sharing a prefix', () => {
+        assert.equal(isWithin('Projects', 'Projects'), true);
+        assert.equal(isWithin('Projects/a.md', 'Projects'), true);
+        assert.equal(isWithin('Projects old/a.md', 'Projects'), false);
+    });
+
+    it('re-roots a path under a renamed folder', () => {
+        assert.equal(replacePrefix('Projects/2026/a.md', 'Projects', 'Work'), 'Work/2026/a.md');
+        assert.equal(replacePrefix('Projects', 'Projects', 'Work'), 'Work');
+    });
+});
+
+describe('mediaTypeOf', () => {
+    it('gives Drive a real type for common attachments', () => {
+        assert.equal(mediaTypeOf('assets/Photo.JPG'), 'image/jpeg');
+        assert.equal(mediaTypeOf('clips/demo.mov'), 'video/quicktime');
+        assert.equal(mediaTypeOf('audio/memo.m4a'), 'audio/mp4');
+        assert.equal(mediaTypeOf('docs/report.pdf'), 'application/pdf');
+    });
+
+    it('falls back to a generic type for unknown or missing extensions', () => {
+        assert.equal(mediaTypeOf('data/blob.xyz'), 'application/octet-stream');
+        assert.equal(mediaTypeOf('Makefile'), 'application/octet-stream');
+        assert.equal(mediaTypeOf('.hidden'), 'application/octet-stream');
     });
 });

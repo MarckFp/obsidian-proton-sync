@@ -154,7 +154,7 @@ export class Auth {
                 throw error;
             }
 
-            const userKeyPassword = parseUserKeyPassword(encryptionKey, response.Payload);
+            const userKeyPassword = await parseUserKeyPassword(encryptionKey, response.Payload);
 
             this.logger.debug('Authentication successful');
 

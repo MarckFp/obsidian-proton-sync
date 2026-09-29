@@ -44,3 +44,18 @@
     font-size: var(--font-ui-smaller);
     white-space: pre;
 }
+
+/* Conflict notice */
+
+.proton-drive-sync-notice-title {
+    font-weight: var(--font-semibold);
+}
+
+.proton-drive-sync-notice-list {
+    margin: var(--size-4-1) 0;
+    padding-inline-start: var(--size-4-4);
+}
+
+.proton-drive-sync-notice-list a {
+    word-break: break-all;
+}

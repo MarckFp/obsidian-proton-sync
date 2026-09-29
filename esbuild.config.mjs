@@ -37,6 +37,28 @@ function resolveOpenPgpBrowserBuild() {
 
 const openpgpFullBuild = resolveOpenPgpBrowserBuild();
 
+/*
+ * `bcryptjs`, which `@protontech/crypto` uses for SRP, imports Node's `crypto`
+ * at the top of its module as a fallback for Web Crypto, and asks browser
+ * builds to leave it out. Left in, it becomes a `require("crypto")` that runs
+ * when the plugin loads, and Obsidian mobile, which has no Node, refuses to
+ * load the plugin at all. Web Crypto exists everywhere Obsidian runs, so the
+ * fallback is never needed: static imports of `crypto` resolve to an empty
+ * module. The plugin's own desktop-only use of Node's crypto, in
+ * `src/sync/vault.ts`, goes through `window.require` at runtime and is not
+ * affected.
+ */
+const noNodeCrypto = {
+    name: 'no-node-crypto',
+    setup(build) {
+        build.onResolve({ filter: /^(node:)?crypto$/ }, () => ({ path: 'crypto', namespace: 'no-node-crypto' }));
+        build.onLoad({ filter: /.*/, namespace: 'no-node-crypto' }, () => ({
+            contents: 'module.exports = {};',
+            loader: 'js',
+        }));
+    },
+};
+
 const context = await esbuild.context({
     entryPoints: ['src/main.ts'],
     bundle: true,
@@ -48,6 +70,7 @@ const context = await esbuild.context({
     minify: production,
     treeShaking: true,
     logLevel: 'info',
+    plugins: [noNodeCrypto],
     alias: {
         openpgp: openpgpFullBuild,
         'openpgp/lightweight': openpgpFullBuild,

@@ -13,7 +13,7 @@
     },
     "dependencies": {
         "@protontech/crypto": "^2.1.3",
-        "@protontech/drive-sdk": "^0.21.1",
+        "@protontech/drive-sdk": "^0.21.3",
         "ky": "^1.14.3"
     },
     "devDependencies": {

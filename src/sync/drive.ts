@@ -1,4 +1,11 @@
-import { NodeType, type NodeEntity, type ProtonDriveClient } from '@protontech/drive-sdk';
+import {
+    NodeType,
+    type FileDownloader,
+    type NodeEntity,
+    type ProtonDriveClient,
+    type Revision,
+    type Thumbnail,
+} from '@protontech/drive-sdk';
 
 import type { Logger } from '../util/logger';
 import { joinPath } from './paths';
@@ -10,6 +17,8 @@ export type RemoteTree = {
     files: Map<string, RemoteState>;
     /** Vault-relative path to the folder's node uid, excluding the root. */
     folders: Map<string, string>;
+    /** Node uid to vault-relative path, for files and folders alike. */
+    nodePaths: Map<string, string>;
     /** Event scope covering the tree, used to subscribe to remote changes. */
     treeEventScopeId: string;
     /** Paths whose name could not be decrypted, and which were skipped. */
@@ -25,10 +34,6 @@ export class DriveIO {
         private readonly client: ProtonDriveClient,
         private readonly logger: Logger,
     ) {}
-
-    async getRootFolder(): Promise<NodeEntity> {
-        return this.client.getMyFilesRootFolder();
-    }
 
     async getNode(nodeUid: string): Promise<NodeEntity> {
         return this.client.getNode(nodeUid);
@@ -47,6 +52,7 @@ export class DriveIO {
         const tree: RemoteTree = {
             files: new Map(),
             folders: new Map(),
+            nodePaths: new Map(),
             treeEventScopeId: root.treeEventScopeId,
             skipped: [],
         };
@@ -70,6 +76,7 @@ export class DriveIO {
                 }
 
                 const path = joinPath(folder.path, name);
+                tree.nodePaths.set(child.uid, path);
 
                 if (child.type === NodeType.Folder) {
                     tree.folders.set(path, child.uid);
@@ -92,23 +99,61 @@ export class DriveIO {
         return tree;
     }
 
-    /** Resolve a node's path relative to the sync root, or null if outside it. */
-    async getPathWithinRoot(nodeUid: string, rootUid: string): Promise<string | null> {
+    /**
+     * Fetch several nodes at once. A uid maps to null when Drive reports that
+     * the node does not exist (or is no longer visible to this account), which
+     * is a definite answer; a failed request throws instead.
+     */
+    async lookupNodes(nodeUids: string[]): Promise<Map<string, NodeEntity | null>> {
+        const found = new Map<string, NodeEntity | null>();
+        for (let i = 0; i < nodeUids.length; i += LOOKUP_BATCH) {
+            for await (const node of this.client.iterateNodes(nodeUids.slice(i, i + LOOKUP_BATCH))) {
+                if ('missingUid' in node) {
+                    found.set(node.missingUid, null);
+                } else {
+                    found.set(node.uid, node);
+                }
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Where a node is now, relative to the sync root.
+     *
+     * The distinction that matters is between "gone" and "not where we
+     * looked". Only the former may delete a file from the vault; treating a
+     * file that merely moved, or one whose lookup failed, as deleted is how a
+     * sync tool destroys notes that were never lost. Errors propagate, so the
+     * caller can leave the path alone until a lookup succeeds.
+     */
+    async locate(nodeUid: string, rootUid: string): Promise<NodeLocation> {
+        const node = (await this.lookupNodes([nodeUid])).get(nodeUid);
+        if (!node || node.trashTime !== undefined) {
+            return { kind: 'deleted' };
+        }
+
         const hierarchy = await this.client.getNodeHierarchy(nodeUid);
-        const rootIndex = hierarchy.findIndex((node) => node.uid === rootUid);
+        // Trashing a folder trashes only the folder node; everything inside
+        // it keeps a clean record of its own, so the ancestors have to be
+        // checked too.
+        if (hierarchy.some((ancestor) => ancestor.trashTime !== undefined)) {
+            return { kind: 'deleted' };
+        }
+        const rootIndex = hierarchy.findIndex((ancestor) => ancestor.uid === rootUid);
         if (rootIndex === -1) {
-            return null;
+            return { kind: 'outside' };
         }
 
         const segments: string[] = [];
-        for (const node of hierarchy.slice(rootIndex + 1)) {
-            const name = nodeName(node);
+        for (const ancestor of hierarchy.slice(rootIndex + 1)) {
+            const name = nodeName(ancestor);
             if (name === undefined) {
-                return null;
+                return { kind: 'unknown' };
             }
             segments.push(name);
         }
-        return segments.join('/');
+        return { kind: 'at', path: segments.join('/'), node };
     }
 
     /**
@@ -131,6 +176,24 @@ export class DriveIO {
         }
     }
 
+    /**
+     * Whether a folder still holds anything, trashed items aside. Children
+     * whose names cannot be decrypted count: they are still someone's files.
+     */
+    async hasLiveChildren(folderUid: string): Promise<boolean> {
+        for await (const child of this.client.iterateFolderChildren(folderUid)) {
+            if (child.trashTime === undefined) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The node's decrypted name, or undefined when it could not be decrypted. */
+    nameOf(node: NodeEntity): string | undefined {
+        return nodeName(node);
+    }
+
     /** Vault-facing view of a node's current revision, if it has one. */
     toRemoteState(node: NodeEntity): RemoteState | undefined {
         return toRemoteState(node);
@@ -144,75 +207,62 @@ export class DriveIO {
     async uploadNewFile(
         parentUid: string,
         name: string,
-        data: ArrayBuffer,
-        options: { mediaType: string; sha1: string; modificationTime: Date },
+        source: UploadSource,
         signal?: AbortSignal,
     ): Promise<{ nodeUid: string; revisionUid: string }> {
-        const uploader = await this.client.getFileUploader(
-            parentUid,
-            name,
-            {
-                mediaType: options.mediaType,
-                expectedSize: data.byteLength,
-                expectedSha1: options.sha1,
-                modificationTime: options.modificationTime,
-            },
-            signal,
-        );
-        const controller = await uploader.uploadFromStream(streamOf(data), []);
-        const { nodeUid, nodeRevisionUid } = await controller.completion();
-        return { nodeUid, revisionUid: nodeRevisionUid };
+        return this.withThumbnailFallback(source, async (stream, thumbnails) => {
+            const uploader = await this.client.getFileUploader(parentUid, name, uploadMetadata(source), signal);
+            const controller = await uploader.uploadFromStream(stream, thumbnails);
+            const { nodeUid, nodeRevisionUid } = await controller.completion();
+            return { nodeUid, revisionUid: nodeRevisionUid };
+        });
     }
 
     async uploadRevision(
         nodeUid: string,
-        data: ArrayBuffer,
-        options: { mediaType: string; sha1: string; modificationTime: Date },
+        source: UploadSource,
         signal?: AbortSignal,
     ): Promise<{ nodeUid: string; revisionUid: string }> {
-        const uploader = await this.client.getFileRevisionUploader(
-            nodeUid,
-            {
-                mediaType: options.mediaType,
-                expectedSize: data.byteLength,
-                expectedSha1: options.sha1,
-                modificationTime: options.modificationTime,
-            },
-            signal,
-        );
-        const controller = await uploader.uploadFromStream(streamOf(data), []);
-        const result = await controller.completion();
-        return { nodeUid: result.nodeUid, revisionUid: result.nodeRevisionUid };
+        return this.withThumbnailFallback(source, async (stream, thumbnails) => {
+            const uploader = await this.client.getFileRevisionUploader(nodeUid, uploadMetadata(source), signal);
+            const controller = await uploader.uploadFromStream(stream, thumbnails);
+            const result = await controller.completion();
+            return { nodeUid: result.nodeUid, revisionUid: result.nodeRevisionUid };
+        });
     }
 
-    async downloadFile(nodeUid: string, signal?: AbortSignal): Promise<ArrayBuffer> {
-        const downloader = await this.client.getFileDownloader(nodeUid, signal);
-
-        const chunks: Uint8Array[] = [];
-        const sink = new WritableStream<Uint8Array>({
-            write(chunk) {
-                chunks.push(chunk);
-            },
-        });
-
-        const controller = downloader.downloadToStream(sink);
-        try {
-            await controller.completion();
-        } catch (error) {
-            // A download can finish and still throw, when the author's
-            // signature does not verify. The bytes are intact but their origin
-            // is unproven, so they are refused rather than silently written
-            // into the vault under the user's own name.
-            if (controller.isDownloadCompleteWithSignatureIssues()) {
-                throw new Error(
-                    'Downloaded content could not be verified as authentic; refusing to write it to the vault',
-                    { cause: error },
-                );
-            }
-            throw error;
+    /**
+     * Run an upload with the source's thumbnails, and once more without them
+     * if that fails.
+     *
+     * A thumbnail is a convenience for Drive's own apps, generated locally by
+     * the browser's image decoder; an image Drive refuses a thumbnail for must
+     * still reach Drive. Only possible for sources held in memory, since a file
+     * stream cannot be replayed.
+     */
+    private async withThumbnailFallback<T>(
+        source: UploadSource,
+        run: (stream: ReadableStream<Uint8Array>, thumbnails: Thumbnail[]) => Promise<T>,
+    ): Promise<T> {
+        if (source.thumbnails.length === 0 || !source.replay) {
+            return run(source.stream(), source.thumbnails);
         }
+        try {
+            return await run(source.stream(), source.thumbnails);
+        } catch (error) {
+            this.logger.debug('Upload with a thumbnail failed; retrying without one', error);
+            return run(source.stream(), []);
+        }
+    }
 
-        return concatChunks(chunks);
+    /** Download the active revision into memory. Meant for files of modest size. */
+    async downloadFile(nodeUid: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+        return collect((sink) => this.downloadTo(nodeUid, sink, signal));
+    }
+
+    /** Stream the active revision into `sink`, so large files never sit in memory whole. */
+    async downloadTo(nodeUid: string, sink: WritableStream<Uint8Array>, signal?: AbortSignal): Promise<void> {
+        await completeDownload(await this.client.getFileDownloader(nodeUid, signal), sink);
     }
 
     /**
@@ -225,17 +275,32 @@ export class DriveIO {
      * pruned, which Drive does depending on the plan's revision history.
      */
     async downloadRevision(revisionUid: string, signal?: AbortSignal): Promise<ArrayBuffer> {
-        const downloader = await this.client.getFileRevisionDownloader(revisionUid, signal);
+        return collect((sink) => this.downloadRevisionTo(revisionUid, sink, signal));
+    }
 
-        const chunks: Uint8Array[] = [];
-        const sink = new WritableStream<Uint8Array>({
-            write(chunk) {
-                chunks.push(chunk);
-            },
-        });
+    async downloadRevisionTo(revisionUid: string, sink: WritableStream<Uint8Array>, signal?: AbortSignal): Promise<void> {
+        await completeDownload(await this.client.getFileRevisionDownloader(revisionUid, signal), sink);
+    }
 
-        await downloader.downloadToStream(sink).completion();
-        return concatChunks(chunks);
+    /**
+     * Revisions of a node created after `afterUid` and before `beforeUid`,
+     * oldest first. Empty when either is no longer in the history.
+     *
+     * Drive has no conditional upload: a new revision replaces whatever is
+     * active, even if another device uploaded one a moment earlier. Listing
+     * what landed between the revision an upload started from and the one it
+     * produced is how the engine notices that it has just superseded someone
+     * else's edit.
+     */
+    async revisionsBetween(nodeUid: string, afterUid: string, beforeUid: string): Promise<Revision[]> {
+        const revisions: Revision[] = [];
+        for await (const revision of this.client.iterateRevisions(nodeUid)) {
+            revisions.push(revision);
+        }
+        revisions.sort((a, b) => a.creationTime.getTime() - b.creationTime.getTime());
+        const start = revisions.findIndex((revision) => revision.uid === afterUid);
+        const end = revisions.findIndex((revision) => revision.uid === beforeUid);
+        return start === -1 || end <= start ? [] : revisions.slice(start + 1, end);
     }
 
     async trashNode(nodeUid: string): Promise<void> {
@@ -258,6 +323,16 @@ export class DriveIO {
         }
     }
 
+    /** The id of the newest event in a scope, to start following it from now. */
+    async latestEventId(treeEventScopeId: string): Promise<string | null> {
+        // Without a cursor the SDK answers with a single fast-forward event
+        // that carries the latest id.
+        for await (const event of this.client.iterateEvents(treeEventScopeId)) {
+            return event.eventId;
+        }
+        return null;
+    }
+
     /** Event ids for the tree, resuming from `lastEventId` when provided. */
     iterateEvents(treeEventScopeId: string, lastEventId?: string, signal?: AbortSignal) {
         return this.client.iterateEvents(treeEventScopeId, lastEventId, signal);
@@ -271,6 +346,40 @@ export class DriveIO {
             );
         }
     }
+}
+
+/** Nodes per `iterateNodes` request. */
+const LOOKUP_BATCH = 100;
+
+export type NodeLocation =
+    /** The node, or a folder above it, is in the trash or no longer exists. */
+    | { kind: 'deleted' }
+    /** Alive, but no longer under the sync root. */
+    | { kind: 'outside' }
+    /** Somewhere in its path a name could not be decrypted. */
+    | { kind: 'unknown' }
+    | { kind: 'at'; path: string; node: NodeEntity };
+
+/** What an upload needs to know about the bytes it is sending. */
+export type UploadSource = {
+    mediaType: string;
+    size: number;
+    sha1: string;
+    modificationTime: Date;
+    thumbnails: Thumbnail[];
+    /** A fresh stream of the content. */
+    stream: () => ReadableStream<Uint8Array>;
+    /** Whether `stream` may be called more than once. */
+    replay: boolean;
+};
+
+function uploadMetadata(source: UploadSource) {
+    return {
+        mediaType: source.mediaType,
+        expectedSize: source.size,
+        expectedSha1: source.sha1,
+        modificationTime: source.modificationTime,
+    };
 }
 
 /** The decrypted name, or undefined when it could not be decrypted. */
@@ -295,13 +404,40 @@ function toRemoteState(node: NodeEntity): RemoteState | undefined {
     };
 }
 
-function streamOf(data: ArrayBuffer): ReadableStream<Uint8Array> {
-    return new ReadableStream<Uint8Array>({
-        start(controller) {
-            controller.enqueue(new Uint8Array(data));
-            controller.close();
-        },
-    });
+/**
+ * Run a download to completion.
+ *
+ * A download can finish and still throw, when the author's signature does not
+ * verify. The bytes are intact but their origin is unproven, so they are
+ * refused rather than silently written into the vault under the user's own
+ * name.
+ */
+async function completeDownload(downloader: FileDownloader, sink: WritableStream<Uint8Array>): Promise<void> {
+    const controller = downloader.downloadToStream(sink);
+    try {
+        await controller.completion();
+    } catch (error) {
+        if (controller.isDownloadCompleteWithSignatureIssues()) {
+            throw new Error(
+                'Downloaded content could not be verified as authentic; refusing to write it to the vault',
+                { cause: error },
+            );
+        }
+        throw error;
+    }
+}
+
+/** Run a download into memory. */
+async function collect(download: (sink: WritableStream<Uint8Array>) => Promise<void>): Promise<ArrayBuffer> {
+    const chunks: Uint8Array[] = [];
+    await download(
+        new WritableStream<Uint8Array>({
+            write(chunk) {
+                chunks.push(chunk);
+            },
+        }),
+    );
+    return concatChunks(chunks);
 }
 
 function concatChunks(chunks: Uint8Array[]): ArrayBuffer {

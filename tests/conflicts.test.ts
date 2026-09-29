@@ -226,6 +226,13 @@ describe('ConflictResolver — merge', () => {
         assert.equal(result.action, 'keep-both');
     });
 
+    it('does not download anything to merge a binary attachment', async () => {
+        const { drive, calls } = stubDrive({ revisions: { 'rev-1': 'x' }, files: { 'node-1': 'y' } });
+        const result = await resolver('merge', drive).resolve(context({ path: 'clips/demo.mp4' }));
+        assert.equal(result.action, 'keep-both');
+        assert.deepEqual(calls, []);
+    });
+
     it('keeps both when there is no recorded ancestor at all', async () => {
         const { drive, calls } = stubDrive();
         const result = await resolver('merge', drive).resolve(
