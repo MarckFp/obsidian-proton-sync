@@ -16,6 +16,7 @@ import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor } from
 import { showConflictNotice } from './ui/conflictNotice';
 import { ConflictsModal } from './ui/conflictsModal';
 import { FirstSyncModal } from './ui/firstSyncModal';
+import { ReloadModal } from './ui/reloadModal';
 import { CONFLICT_POLICIES, ProtonDriveSyncSettingsTab } from './ui/settingsTab';
 import { SetupModal } from './ui/setupModal';
 import { StatusBar } from './ui/statusBar';
@@ -95,8 +96,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             {
                 onChange: (summary) => this.onSyncChange(summary),
                 onConflict: (event) => this.onConflict(event),
+                onSettingsAdopted: (paths) => this.onSettingsAdopted(paths),
             },
-            { configDir: this.app.vault.configDir, pluginDir: this.pluginDir() },
+            { configDir: this.app.vault.configDir, pluginDir: this.pluginDir(), pluginId: this.manifest.id },
             {
                 isMobile: Platform.isMobileApp,
                 isMetered: () => networkConnection()?.type === 'cellular',
@@ -249,6 +251,11 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * Goes ahead without asking when one side is empty or both already agree,
      * and also when the preview itself fails: a first sync has no record of
      * earlier state, so it can add and keep copies but never delete.
+     *
+     * A vault holding nothing but its config folder counts as empty. That is
+     * what a vault created a minute ago looks like: Obsidian's default
+     * settings and this plugin, nothing the user would miss when Drive's
+     * settings replace them.
      */
     private async confirmFirstSync(): Promise<boolean> {
         const rootUid = this.settings.remoteFolderUid;
@@ -265,7 +272,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             return true;
         }
         const changes = plan.uploads.length + plan.downloads.length + plan.conflicts.length + plan.removals.length;
-        if (plan.localFiles === 0 || plan.remoteFiles === 0 || changes === 0) {
+        if (plan.localNotes === 0 || plan.remoteFiles === 0 || changes === 0) {
             return true;
         }
 
@@ -274,6 +281,22 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         return new Promise((resolve) => {
             new FirstSyncModal(this.app, plan, folderName, policy.toLowerCase(), resolve).open();
         });
+    }
+
+    /**
+     * Drive's Obsidian settings are now in this vault, but Obsidian keeps
+     * running on the ones it loaded at startup, with the plugins, themes and
+     * snippets that came with them, until it reloads.
+     */
+    private onSettingsAdopted(paths: string[]): void {
+        new ReloadModal(this.app, paths, () => this.reloadApp()).open();
+    }
+
+    private reloadApp(): void {
+        const commands = (this.app as App & { commands?: { executeCommandById(id: string): boolean } }).commands;
+        if (!commands?.executeCommandById('app:reload')) {
+            window.location.reload();
+        }
     }
 
     private async syncNowOrSetUp(): Promise<void> {

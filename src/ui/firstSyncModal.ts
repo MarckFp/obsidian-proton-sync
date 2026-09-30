@@ -47,6 +47,11 @@ export class FirstSyncModal extends Modal {
             plan.conflicts,
             `on both sides with different content. Your conflict setting decides: ${this.conflictPolicy}.`,
         );
+        this.group(
+            list,
+            plan.settings,
+            'of Obsidian settings replaced by the ones on Drive. Obsidian asks to reload afterwards to apply them.',
+        );
         this.group(list, plan.held, 'over a size limit, so left where they are');
         this.group(list, plan.removals, 'removed, because an earlier sync recorded them');
         if (plan.unchanged > 0) {

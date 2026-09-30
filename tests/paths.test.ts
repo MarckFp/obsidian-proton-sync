@@ -42,14 +42,14 @@ describe('PathFilter — built-in exclusions', () => {
 describe('PathFilter — the config folder', () => {
     const filter = new PathFilter([], true, '.obsidian', '.obsidian/plugins/proton-drive-sync');
 
-    it('never syncs this plugin’s per-device files', () => {
+    it('never syncs this plugin’s own folder: its per-device files or its code', () => {
         assert.equal(filter.isExcluded('.obsidian/plugins/proton-drive-sync/data.json'), true);
-        assert.equal(filter.isExcluded('.obsidian/plugins/proton-drive-sync/session.json'), true);
         assert.equal(filter.isExcluded('.obsidian/plugins/proton-drive-sync/sync-state.json'), true);
+        assert.equal(filter.isExcludedWithAncestors('.obsidian/plugins/proton-drive-sync/main.js'), true);
     });
 
-    it('still syncs the plugin’s code, and other plugins’ settings', () => {
-        assert.equal(filter.isExcluded('.obsidian/plugins/proton-drive-sync/main.js'), false);
+    it('still syncs other plugins, code and settings alike', () => {
+        assert.equal(filter.isExcluded('.obsidian/plugins/dataview/main.js'), false);
         assert.equal(filter.isExcluded('.obsidian/plugins/dataview/data.json'), false);
     });
 

@@ -128,7 +128,7 @@ palette. Everything it sets is also in **Settings → Proton Drive Sync**.
 3. **Choose whether to sync Obsidian settings** (on by default), then **Start
    syncing**. Nothing is transferred before that.
 
-If both the vault and the Drive folder already hold files, the first sync shows
+If both the vault and the Drive folder already hold notes, the first sync shows
 a preview first: how many files will be downloaded, uploaded, or are on both
 sides with different content, with the file names one click away. **Start
 syncing** goes ahead; **Not now** pauses syncing until you resume it. A first
@@ -137,8 +137,21 @@ sync never deletes anything on either side. The same preview appears after
 
 On each additional device, sign in and pick **the same folder**. The first sync
 pairs up files that already match, byte for byte, without transferring them.
-Settings from Drive take precedence over a new device's defaults. Restart
-Obsidian after that first sync so it loads them.
+Settings from Drive take precedence over a new device's defaults, without being
+reported as conflicts. Obsidian only loads its settings, plugins, themes and CSS
+snippets at startup, so a first sync brings the `.obsidian` folder down before
+any note, and a dialog then lists what came down and offers **Reload now**.
+Reloading at that point is quick, since the notes have not arrived yet, and
+safe: if you reload, the notes pick up where they left off afterwards; if you
+choose **Later**, they keep syncing in the meantime. Until you reload, settings changes on that device are not
+uploaded, so the defaults it is still running on cannot replace your settings on
+Drive; changes coming from Drive still arrive. If Drive's list of enabled
+plugins does not include Proton Drive Sync, it is added back, so the reload
+never switches syncing off.
+
+Joining with a brand-new vault, one that holds nothing but Obsidian's default
+settings, skips the preview described below: there is nothing of yours in it
+for Drive's files to clash with.
 
 ## How conflicts are handled
 
@@ -180,8 +193,9 @@ folder — moved elsewhere in Drive, or not found because a request failed — i
 kept, and uploaded again if needed.
 
 Files in the `.obsidian` folder never get conflict copies, since Obsidian would
-never read them. When a new device joins, Drive's copy wins. Otherwise the most
-recent edit wins.
+never read them, and never raise a conflict notice, since there is nothing to
+decide. When a new device joins, Drive's copy wins. Otherwise the most recent
+edit wins.
 
 ## Pausing, progress and troubleshooting
 
@@ -206,8 +220,9 @@ look it over before sharing it.
 ## What is never synced
 
 Regardless of settings: `.obsidian/workspace.json` and the other pane-layout and
-cache files (devices fight over them), this plugin's own sign-in, sync state and
-settings (they belong to each device), `.trash/`, `.git/`, `.DS_Store`,
+cache files (devices fight over them), this plugin's own folder (its settings
+and sync state belong to each device, and each device updates the plugin itself
+through Obsidian), `.trash/`, `.git/`, `.DS_Store`,
 `Thumbs.db`, and editor scratch files. `.obsidian` as a whole is excluded if you
 turn off **Sync Obsidian settings**.
 

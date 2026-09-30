@@ -84,11 +84,13 @@ export const ALWAYS_EXCLUDED = [
  *
  * `workspace.json` and friends record which panes are open and where; syncing
  * them makes two devices fight over each other's layout on every focus change.
- * This plugin's own files are per-device by nature: the sync state is this
- * device's merge base and `data.json` carries its device name. `session.json`
- * is where 0.1.0 kept the sign-in; it is migrated away on load, but a device
- * still on 0.1.0 may have one. Syncing any of them would make every device
- * impersonate the last one to write.
+ *
+ * This plugin's whole folder stays local too. Its data files are per-device by
+ * nature: the sync state is this device's merge base and `data.json` carries
+ * its device name. Its code gains nothing from syncing either, since a device
+ * has to have the plugin installed before it can sync at all; syncing it only
+ * meant one device's version replacing another's while it ran, a downgrade as
+ * often as an upgrade. Each device updates it through Obsidian instead.
  */
 export function configExclusions(configDir: string, pluginDir: string | null): string[] {
     const patterns = [
@@ -98,7 +100,7 @@ export function configExclusions(configDir: string, pluginDir: string | null): s
         `${configDir}/cache`,
     ];
     if (pluginDir) {
-        patterns.push(`${pluginDir}/data.json`, `${pluginDir}/session.json`, `${pluginDir}/sync-state.json`);
+        patterns.push(`${pluginDir}/`);
     }
     return patterns;
 }

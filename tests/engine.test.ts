@@ -24,6 +24,7 @@ async function setup(
         settings?: Partial<PluginSettings>;
         environment?: EngineEnvironment;
         start?: boolean;
+        onSettingsAdopted?: (paths: string[]) => void;
     } = {},
 ) {
     const vault = options.vault ?? new MemoryVault();
@@ -32,6 +33,7 @@ async function setup(
     await state.load('me@proton.me', SYNC_ROOT);
 
     const conflicts: ConflictEvent[] = [];
+    const adopted: string[] = [];
     const settings: PluginSettings = {
         ...DEFAULT_SETTINGS,
         uploadDebounceMs: 0,
@@ -43,8 +45,15 @@ async function setup(
         state,
         settings,
         SILENT,
-        { onChange: () => undefined, onConflict: (event) => conflicts.push(event) },
-        { configDir: '.obsidian', pluginDir: PLUGIN_DIR },
+        {
+            onChange: () => undefined,
+            onConflict: (event) => conflicts.push(event),
+            onSettingsAdopted: (paths) => {
+                adopted.push(...paths);
+                options.onSettingsAdopted?.(paths);
+            },
+        },
+        { configDir: '.obsidian', pluginDir: PLUGIN_DIR, pluginId: 'proton-drive-sync' },
         options.environment,
     );
     running.push(engine);
@@ -59,7 +68,7 @@ async function setup(
             await (engine as unknown as { queue: Promise<void> }).queue;
         }
     };
-    return { vault, drive, state, engine, conflicts, settled, settings };
+    return { vault, drive, state, engine, conflicts, adopted, settled, settings };
 }
 
 describe('SyncEngine — renaming a new note', () => {
@@ -277,7 +286,7 @@ describe('SyncEngine — attachments', () => {
 });
 
 describe('SyncEngine — the config folder', () => {
-    it('syncs settings but never this plugin’s per-device files', async () => {
+    it('syncs settings but never this plugin’s own folder', async () => {
         const vault = new MemoryVault();
         vault.write('.obsidian/app.json', '{"theme":"dark"}');
         vault.write(`${PLUGIN_DIR}/data.json`, '{"deviceName":"laptop"}');
@@ -286,7 +295,7 @@ describe('SyncEngine — the config folder', () => {
         vault.write('.obsidian/workspace.json', '{}');
         const { drive } = await setup({ vault });
 
-        assert.deepEqual(drive.filePaths(), ['.obsidian/app.json', `${PLUGIN_DIR}/main.js`]);
+        assert.deepEqual(drive.filePaths(), ['.obsidian/app.json']);
     });
 
     it('lets Drive’s settings win when a new device joins, without conflict copies', async () => {
@@ -301,7 +310,8 @@ describe('SyncEngine — the config folder', () => {
             [...vault.files.keys()].filter((path) => path.includes('conflict')),
             [],
         );
-        assert.equal(conflicts[0]?.outcome, 'kept-remote');
+        // Settled by rule, not a conflict the user needs telling about.
+        assert.deepEqual(conflicts, []);
     });
 });
 
@@ -824,5 +834,120 @@ describe('SyncEngine — first-sync plan', () => {
 
         assert.equal(vault.read('remote.md'), undefined);
         assert.equal(drive.text('local.md'), undefined);
+    });
+});
+
+describe('SyncEngine — a new vault joining an existing one', () => {
+    /** What Obsidian creates in a brand-new vault once this plugin is installed. */
+    function newVault(): MemoryVault {
+        const vault = new MemoryVault();
+        vault.write('.obsidian/app.json', '{}');
+        vault.write('.obsidian/appearance.json', '{}');
+        vault.write('.obsidian/community-plugins.json', '["proton-drive-sync"]');
+        vault.write(`${PLUGIN_DIR}/main.js`, 'plugin v0.3.0');
+        return vault;
+    }
+
+    function syncedDrive(): FakeDrive {
+        const drive = new FakeDrive();
+        drive.put('.obsidian/app.json', '{"vimMode":true}');
+        drive.put('.obsidian/appearance.json', '{"theme":"obsidian"}');
+        drive.put('.obsidian/community-plugins.json', '["proton-drive-sync","dataview"]');
+        drive.put(`${PLUGIN_DIR}/main.js`, 'plugin v0.2.1');
+        drive.put('Note.md', 'hello');
+        return drive;
+    }
+
+    it('takes the settings from Drive without reporting conflicts, and asks for a reload', async () => {
+        const { vault, conflicts, adopted, settled } = await setup({ vault: newVault(), drive: syncedDrive() });
+        await settled();
+
+        assert.equal(vault.read('.obsidian/app.json'), '{"vimMode":true}');
+        assert.equal(vault.read('Note.md'), 'hello');
+        assert.deepEqual(conflicts, []);
+        assert.deepEqual(adopted, [
+            '.obsidian/app.json',
+            '.obsidian/appearance.json',
+            '.obsidian/community-plugins.json',
+        ]);
+    });
+
+    it('settles the settings and asks for the reload before any note arrives', async () => {
+        const vault = newVault();
+        const drive = syncedDrive();
+        drive.put('Later.md', 'another note');
+        let notesWhenAsked: string[] | null = null;
+        let savedStateWhenAsked = '';
+        const { settled } = await setup({
+            vault,
+            drive,
+            onSettingsAdopted: () => {
+                notesWhenAsked = vault.notePaths();
+                savedStateWhenAsked = vault.read(`${PLUGIN_DIR}/sync-state.json`) ?? '';
+            },
+        });
+        await settled();
+
+        assert.deepEqual(notesWhenAsked, []);
+        // Saved before asking, so reloading straight away loses nothing.
+        assert.match(savedStateWhenAsked, /\.obsidian\/app\.json/);
+        assert.deepEqual(vault.notePaths(), ['Later.md', 'Note.md']);
+    });
+
+    it('never replaces the running plugin with the copy on Drive', async () => {
+        const { vault, drive, settled } = await setup({ vault: newVault(), drive: syncedDrive() });
+        await settled();
+
+        assert.equal(vault.read(`${PLUGIN_DIR}/main.js`), 'plugin v0.3.0');
+        assert.equal(drive.text(`${PLUGIN_DIR}/main.js`), 'plugin v0.2.1');
+    });
+
+    it('keeps local settings changes off Drive until Obsidian reloads, but still takes Drive’s', async () => {
+        const drive = syncedDrive();
+        const { vault, engine, settled } = await setup({ vault: newVault(), drive });
+        await settled();
+
+        // Obsidian, still running on the new vault's defaults, saves them.
+        vault.write('.obsidian/app.json', '{}');
+        const appearance = drive.put('.obsidian/appearance.json', '{"theme":"moonstone"}');
+        drive.emit(appearance);
+        engine.pollNow();
+        await settled();
+
+        assert.equal(drive.text('.obsidian/app.json'), '{"vimMode":true}');
+        assert.equal(vault.read('.obsidian/appearance.json'), '{"theme":"moonstone"}');
+    });
+
+    it('stays enabled when Drive’s list of enabled plugins does not include it', async () => {
+        const drive = syncedDrive();
+        drive.put('.obsidian/community-plugins.json', '["dataview"]');
+        const { vault, settled } = await setup({ vault: newVault(), drive });
+        await settled();
+
+        assert.deepEqual(JSON.parse(vault.read('.obsidian/community-plugins.json')!), ['dataview', 'proton-drive-sync']);
+        // Held with the other settings until Obsidian reloads.
+        assert.equal(drive.text('.obsidian/community-plugins.json'), '["dataview"]');
+    });
+
+    it('leaves a list that already includes it exactly as Drive has it', async () => {
+        const { vault, settled } = await setup({ vault: newVault(), drive: syncedDrive() });
+        await settled();
+        assert.equal(vault.read('.obsidian/community-plugins.json'), '["proton-drive-sync","dataview"]');
+    });
+
+    it('counts a vault with only settings as having no notes, and lists the settings apart', async () => {
+        const vault = newVault();
+        const drive = syncedDrive();
+        const { engine } = await setup({ vault, drive, start: false });
+        const plan = await engine.plan(drive.client() as unknown as ProtonDriveClient, SYNC_ROOT);
+
+        assert.equal(plan.localNotes, 0);
+        assert.deepEqual(plan.conflicts, []);
+        assert.deepEqual(plan.settings, [
+            '.obsidian/app.json',
+            '.obsidian/appearance.json',
+            '.obsidian/community-plugins.json',
+        ]);
+        assert.deepEqual(plan.downloads, ['Note.md']);
     });
 });

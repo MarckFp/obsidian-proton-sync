@@ -99,8 +99,8 @@ export class SetupModal extends Modal {
             .setDesc(
                 `Includes the ${this.app.vault.configDir} folder: appearance, hotkeys, installed plugins and ` +
                     'their settings. Pane layouts and this plugin’s sign-in stay on each device. ' +
-                    'On a device joining an existing vault, the settings from Drive are used; ' +
-                    'restart Obsidian after the first sync to apply them.',
+                    'On a device joining an existing vault, the settings from Drive are used, and ' +
+                    'Obsidian offers to reload after the first sync to apply them.',
             )
             .addToggle((toggle) =>
                 toggle.setValue(this.plugin.settings.syncObsidianConfig).onChange(async (value) => {

@@ -54,11 +54,19 @@ export type SyncSummary = {
 /** What a first sync would do, worked out without touching either side. */
 export type SyncPlan = {
     localFiles: number;
+    /** Local files outside the config folder: zero for a vault that has only just been created. */
+    localNotes: number;
     remoteFiles: number;
     uploads: string[];
     downloads: string[];
     /** On both sides with different content: handled by the conflict policy. */
     conflicts: string[];
+    /**
+     * Obsidian settings files Drive's copy will replace. Kept apart from
+     * `conflicts` because the conflict policy never applies to them: when a
+     * device joins, Drive's settings win.
+     */
+    settings: string[];
     /** Removals, which a first sync never makes; listed only if state was not empty. */
     removals: string[];
     /** Over a size limit, so left where they are. */
@@ -89,13 +97,20 @@ export type ConflictEvent = {
 export type EngineHooks = {
     onChange: (summary: SyncSummary) => void;
     onConflict: (event: ConflictEvent) => void;
+    /**
+     * A first sync replaced this device's Obsidian settings with the ones on
+     * Drive. Obsidian only reads them at startup, so it needs a reload.
+     */
+    onSettingsAdopted?: (paths: string[]) => void;
 };
 
 /** Where this vault keeps things the path filter needs to know about. */
 export type VaultScope = {
     configDir: string;
-    /** This plugin's own folder, whose per-device files never sync. */
+    /** This plugin's own folder, which never syncs. */
     pluginDir: string | null;
+    /** This plugin's id, which must stay in the list of enabled plugins; see {@link SyncEngine.keepSelfEnabled}. */
+    pluginId?: string;
 };
 
 type PendingRename = { from: string; to: string; isFolder: boolean };
@@ -178,6 +193,16 @@ export class SyncEngine {
      * follows it while the files are unchanged, so nothing is hashed twice.
      */
     private readonly plannedLocal = new Map<string, LocalState>();
+    /** Settings files downloaded by the first sync now running; null when this is not a first sync. */
+    private adoptingSettings: string[] | null = null;
+    /**
+     * Set once a first sync has put Drive's settings in place. Until Obsidian
+     * reloads, it still runs on the settings it started with, and would write
+     * those back over the downloaded files at its next save; uploading them
+     * would then replace the settings on Drive with a new vault's defaults. So
+     * settings files only come down, never go up, for the rest of the session.
+     */
+    private settingsHeld = false;
 
     private queue: Promise<void> = Promise.resolve();
     private pollTimer: number | null = null;
@@ -490,6 +515,7 @@ export class SyncEngine {
             // A full pass settles everything, including what earlier polls
             // could not.
             this.retryPaths.clear();
+            this.adoptingSettings = this.state.paths().length === 0 ? [] : null;
 
             // Where the event feed stands, taken before the listing, so that
             // a change made while the tree is walked is still replayed by the
@@ -541,6 +567,22 @@ export class SyncEngine {
             }
 
             this.caseCollisions = this.findCaseCollisions(paths);
+            if (this.adoptingSettings) {
+                // A first sync settles the config folder before anything
+                // else. Obsidian needs a reload to apply settings, plugins and
+                // themes from Drive, and asking for it now, while the vault is
+                // still nearly empty, makes the reload quick and spares
+                // Obsidian and its plugins indexing every note twice. The
+                // state is saved first, so a reload loses none of it; the
+                // notes then continue, or resume after the reload.
+                const settingsPaths = new Set([...paths].filter((path) => this.filter.isConfigPath(path)));
+                await this.reconcileAll(settingsPaths, tree.files, skip);
+                await this.state.flush();
+                this.announceAdoptedSettings();
+                for (const path of settingsPaths) {
+                    paths.delete(path);
+                }
+            }
             await this.reconcileAll(paths, tree.files, skip);
             await this.cleanUpDeletedFolders(goneFolders, locallyDeletedFolders);
             this.plannedLocal.clear();
@@ -551,6 +593,7 @@ export class SyncEngine {
         } catch (error) {
             this.reportFailure('Full sync failed', error);
         } finally {
+            this.adoptingSettings = null;
             await this.state.flush();
         }
     }
@@ -625,34 +668,53 @@ export class SyncEngine {
         const limit = this.sizeLimitBytes();
         this.progress = ordered.length > 1 ? { done: 0, total: ordered.length } : null;
 
-        const work = ordered.map((path) => async () => {
-            try {
-                if (this.state.isConflicted(path) && this.settings.conflictPolicy === 'manual') {
-                    // Left for the user; acting now would undo a pending decision.
-                    return;
-                }
-                let decision = await this.decide(path, remoteStates.get(path), limit);
-                if (!decision) {
-                    return;
-                }
-                if (!needsTransfer(decision.action)) {
-                    await this.applyAction(path, decision.action, decision.local, decision.remote);
-                    return;
-                }
-                await transfers.run(async () => {
-                    if (decision && (await this.localMoved(path, decision.local))) {
-                        decision = await this.decide(path, remoteStates.get(path), limit);
+        // Deciding runs in parallel, but paths take their place in the
+        // transfer queue strictly in `ordered` order: each waits for the one
+        // before it to be queued or found to need nothing. Without this, a
+        // large attachment decided a moment sooner would take a slot ahead of
+        // the notes the ordering is there to put first.
+        let previousQueued: Promise<void> = Promise.resolve();
+        const work = ordered.map((path) => {
+            const turn = previousQueued;
+            let markQueued!: () => void;
+            previousQueued = new Promise<void>((resolve) => (markQueued = resolve));
+
+            return async () => {
+                try {
+                    if (this.state.isConflicted(path) && this.settings.conflictPolicy === 'manual') {
+                        // Left for the user; acting now would undo a pending decision.
+                        return;
                     }
-                    if (decision) {
+                    let decision = await this.decide(path, remoteStates.get(path), limit);
+                    await turn;
+                    if (!decision) {
+                        return;
+                    }
+                    if (!needsTransfer(decision.action)) {
+                        markQueued();
                         await this.applyAction(path, decision.action, decision.local, decision.remote);
+                        return;
                     }
-                });
-            } finally {
-                if (this.progress) {
-                    this.progress.done++;
-                    this.emitChange();
+                    // `run` claims its place synchronously, so the next path
+                    // may go as soon as it has been called.
+                    const transfer = transfers.run(async () => {
+                        if (decision && (await this.localMoved(path, decision.local))) {
+                            decision = await this.decide(path, remoteStates.get(path), limit);
+                        }
+                        if (decision) {
+                            await this.applyAction(path, decision.action, decision.local, decision.remote);
+                        }
+                    });
+                    markQueued();
+                    await transfer;
+                } finally {
+                    markQueued();
+                    if (this.progress) {
+                        this.progress.done++;
+                        this.emitChange();
+                    }
                 }
-            }
+            };
         });
 
         const failed: string[] = [];
@@ -692,6 +754,14 @@ export class SyncEngine {
         });
         if (remote?.size !== undefined && remote.size > limit && (action.type === 'download' || action.type === 'conflict')) {
             this.logger.info(`Leaving "${path}" on Drive: ${megabytes(remote.size)} MB exceeds this device's limit`);
+            return null;
+        }
+        if (
+            this.settingsHeld &&
+            this.filter.isConfigPath(path) &&
+            (action.type === 'upload' || action.type === 'delete-remote' || action.type === 'conflict')
+        ) {
+            this.logger.debug(`Holding "${path}" until Obsidian reloads with the settings from Drive`);
             return null;
         }
         return { action, local, remote };
@@ -869,7 +939,7 @@ export class SyncEngine {
         this.logger.warn(`"${path}" was saved on another device during this upload; keeping that version as "${copyPath}"`);
         await this.fetchInto(copyPath, { revisionUid: lost.uid }, lost.claimedSize, lost.claimedModificationTime?.getTime());
         await this.uploadAsNewFile(copyPath);
-        this.hooks.onConflict({ path, reason: 'both-modified', outcome: 'kept-both', copyPath });
+        this.reportConflict({ path, reason: 'both-modified', outcome: 'kept-both', copyPath });
     }
 
     /** Upload a file that has no node on Drive yet, such as a fresh conflict copy. */
@@ -891,6 +961,12 @@ export class SyncEngine {
         const written = await this.fetchInto(path, { nodeUid }, remote?.size, remote?.mtime);
         this.downloaded++;
         this.state.setSynced(path, nodeUid, 'file', baseOf(written, revisionUid));
+        if (this.adoptingSettings && this.filter.isConfigPath(path)) {
+            this.adoptingSettings.push(path);
+        }
+        if (path === `${this.scope.configDir}/community-plugins.json`) {
+            await this.keepSelfEnabled(path);
+        }
         this.logger.debug(`Downloaded "${path}"`);
     }
 
@@ -960,7 +1036,7 @@ export class SyncEngine {
             case 'defer':
                 this.state.setConflict(path, { detectedAt: Date.now(), reason });
                 this.logger.warn(`"${path}" needs a decision: ${resolution.note}`);
-                this.hooks.onConflict({ path, reason, outcome: 'deferred' });
+                this.reportConflict({ path, reason, outcome: 'deferred' });
                 return;
 
             case 'take-local':
@@ -974,7 +1050,7 @@ export class SyncEngine {
                     }
                     await this.upload(path, remote);
                     this.state.clearConflict(path);
-                    this.hooks.onConflict({ path, reason, outcome: 'kept-local' });
+                    this.reportConflict({ path, reason, outcome: 'kept-local' });
                 }
                 return;
 
@@ -982,7 +1058,7 @@ export class SyncEngine {
                 if (remote) {
                     await this.download(path, remote.nodeUid, remote.revisionUid, remote);
                     this.state.clearConflict(path);
-                    this.hooks.onConflict({ path, reason, outcome: 'kept-remote' });
+                    this.reportConflict({ path, reason, outcome: 'kept-remote' });
                 }
                 return;
 
@@ -990,14 +1066,14 @@ export class SyncEngine {
                 await this.vault.writeBinary(path, resolution.content);
                 await this.upload(path, remote);
                 this.state.clearConflict(path);
-                this.hooks.onConflict({ path, reason, outcome: 'merged' });
+                this.reportConflict({ path, reason, outcome: 'merged' });
                 return;
             }
 
             case 'keep-both': {
                 const copyPath = await this.availablePath(resolution.copyPath);
                 if (await this.keepBoth(path, copyPath, resolution.keepAtPath, local, remote, reason)) {
-                    this.hooks.onConflict({ path, reason, outcome: 'kept-both', copyPath });
+                    this.reportConflict({ path, reason, outcome: 'kept-both', copyPath });
                 }
                 return;
             }
@@ -2109,6 +2185,66 @@ export class SyncEngine {
         return largest ? { ...largest } : null;
     }
 
+    /** Hold local settings changes and ask for a reload, if the first sync took settings from Drive. */
+    private announceAdoptedSettings(): void {
+        const adopted = this.adoptingSettings ?? [];
+        this.adoptingSettings = null;
+        if (adopted.length === 0) {
+            return;
+        }
+        this.settingsHeld = true;
+        this.logger.info(
+            `Took ${adopted.length} settings file(s) from Drive; settings changes here are held until Obsidian reloads`,
+        );
+        this.hooks.onSettingsAdopted?.(adopted.sort((a, b) => a.localeCompare(b)));
+    }
+
+    /**
+     * Make sure a downloaded list of enabled plugins still includes this one.
+     *
+     * Obsidian decides which plugins to load from `community-plugins.json`.
+     * Taking Drive's copy wholesale, as a joining device does, would switch
+     * this plugin off at the next reload whenever that copy lacks it (written
+     * before it was installed, say), and with it the sync. Adding it back only
+     * ever keeps it on; the corrected list is uploaded by the next pass like
+     * any local edit, so Drive's copy stops lacking it.
+     */
+    private async keepSelfEnabled(path: string): Promise<void> {
+        const id = this.scope.pluginId;
+        if (!id) {
+            return;
+        }
+        let enabled: unknown;
+        try {
+            enabled = JSON.parse(await this.vault.readText(path));
+        } catch (error) {
+            this.logger.warn(`Could not read "${path}" to check this plugin is still enabled`, error);
+            return;
+        }
+        if (!Array.isArray(enabled) || enabled.includes(id)) {
+            return;
+        }
+        enabled.push(id);
+        await this.vault.writeBinary(path, new TextEncoder().encode(JSON.stringify(enabled, null, 2)).buffer);
+        this.logger.warn(`Drive's list of enabled plugins did not include this one; added it back so syncing stays on`);
+    }
+
+    /**
+     * Tell the user about a conflict, unless it was in the config folder.
+     *
+     * Settings files are settled by a fixed rule, Drive's copy when a device
+     * joins and the newest edit otherwise, and never leave a copy to look at.
+     * A notice for them only reads as something having gone wrong: on a new
+     * device every default settings file would be listed as a conflict.
+     */
+    private reportConflict(event: ConflictEvent): void {
+        if (this.filter.isConfigPath(event.path)) {
+            this.logger.info(`Settings file "${event.path}" differed on both sides (${event.reason}): ${event.outcome}`);
+            return;
+        }
+        this.hooks.onConflict(event);
+    }
+
     /** Tell the UI about progress, at most once per {@link CHANGE_THROTTLE_MS}. */
     private emitChange(): void {
         if (this.changeTimer !== null) {
@@ -2159,10 +2295,12 @@ export class SyncEngine {
         const remoteFiles = [...tree.files.keys()].filter(included);
         const plan: SyncPlan = {
             localFiles: localFiles.length,
+            localNotes: localFiles.filter((path) => !this.filter.isConfigPath(path)).length,
             remoteFiles: remoteFiles.length,
             uploads: [],
             downloads: [],
             conflicts: [],
+            settings: [],
             removals: [],
             held: [],
             unchanged: 0,
@@ -2189,6 +2327,10 @@ export class SyncEngine {
                     ...(localState !== undefined && { local: localState }),
                     ...(remote !== undefined && { remote }),
                 });
+                if ((action.type === 'download' || action.type === 'conflict') && this.filter.isConfigPath(path)) {
+                    plan.settings.push(path);
+                    return;
+                }
                 switch (action.type) {
                     case 'upload':
                         plan.uploads.push(path);
@@ -2211,7 +2353,7 @@ export class SyncEngine {
             (error, index) => this.logger.warn(`Could not check "${paths[index]}"`, error),
         );
 
-        for (const list of [plan.uploads, plan.downloads, plan.conflicts, plan.removals, plan.held]) {
+        for (const list of [plan.uploads, plan.downloads, plan.conflicts, plan.settings, plan.removals, plan.held]) {
             list.sort((a, b) => a.localeCompare(b));
         }
         return plan;
