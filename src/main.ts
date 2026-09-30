@@ -69,6 +69,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     /** Wrong PINs entered so far in this run; see {@link UnlockModal}. */
     private readonly pinFailures = { count: 0 };
     private unlocking: Promise<boolean> | null = null;
+    private settingsTab: ProtonDriveSyncSettingsTab | null = null;
+    /** What the settings tab last rendered from; see {@link refreshSettingsTab}. */
+    private settingsTabKey = '';
     engine!: SyncEngine;
 
     private statusBar!: StatusBar;
@@ -153,7 +156,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         );
 
         this.summary = this.engine.getSummary();
-        this.addSettingTab(new ProtonDriveSyncSettingsTab(this.app, this));
+        this.settingsTab = new ProtonDriveSyncSettingsTab(this.app, this);
+        this.addSettingTab(this.settingsTab);
         this.registerCommands();
         this.registerVaultEvents();
         this.registerLifecycleEvents();
@@ -287,6 +291,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                     await this.sessionSlot.setPin(newPin);
                 }
                 this.pinEnabled = mode !== 'remove';
+                this.refreshSettingsTab();
                 this.notify(
                     mode === 'set'
                         ? 'PIN set. Obsidian will ask for it when it starts.'
@@ -325,6 +330,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         }
         const { revoked } = await this.session.signOut();
         this.pinEnabled = false;
+        this.refreshSettingsTab();
         this.notify(
             revoked
                 ? 'signed out, and the session was ended on Proton.'
@@ -642,6 +648,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     private showStatus(summary: SyncSummary): void {
         this.summary = summary;
         this.statusBar.update(summary);
+        this.refreshSettingsTab();
         if (this.ribbonIcon) {
             setIcon(this.ribbonIcon, statusIcon(summary));
             this.ribbonIcon.toggleClass('proton-drive-sync-spin', summary.status === 'syncing');
@@ -652,6 +659,38 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 leaf.view.update(summary);
             }
         }
+    }
+
+    /**
+     * Rebuild the settings tab when something it shows has changed.
+     *
+     * Obsidian reads a tab's setting definitions when the tab is added, at
+     * plugin load, and again only when the plugin calls `update()`; opening
+     * the settings just redraws what it read then. At load the saved sign-in
+     * has not been restored yet, so without this the tab would keep showing
+     * a vault signed in last week as signed out, and hide what depends on
+     * being signed in, such as the PIN. Keyed, so the progress updates that
+     * arrive several times a second during a sync do not rebuild it each time.
+     */
+    refreshSettingsTab(): void {
+        if (!this.settingsTab) {
+            return;
+        }
+        const key = JSON.stringify([
+            this.session.isSignedIn(),
+            this.session.accountEmail,
+            this.locked,
+            this.pinEnabled,
+            this.settings.remoteFolderUid,
+            this.settings.remoteFolderPath,
+            this.settings.conflictPolicy,
+            this.summary?.conflicts,
+        ]);
+        if (key === this.settingsTabKey) {
+            return;
+        }
+        this.settingsTabKey = key;
+        this.settingsTab.update();
     }
 
     /** Re-show the current summary, so "synced 5m ago" keeps counting. */
