@@ -321,7 +321,7 @@ and why it is there.
 
 ## Licence
 
-Copyright (C) 2026 maez.
+Copyright (C) 2026 MarckFp.
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
