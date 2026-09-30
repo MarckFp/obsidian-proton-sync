@@ -1,7 +1,9 @@
 # Vendored: `proton-drive-sdk-account`
 
 This directory is a copy of `incubating/account/js/src` from
-[ProtonDriveApps/sdk](https://github.com/ProtonDriveApps/sdk) (MIT).
+[ProtonDriveApps/sdk](https://github.com/ProtonDriveApps/sdk), under the MIT
+licence reproduced in [LICENSE.md](LICENSE.md). These files keep that licence;
+the rest of the project is GPL-3.0-or-later.
 
 It provides Proton account login, session refresh and address-key handling —
 everything `ProtonDriveClient` needs to be handed a `ProtonDriveAccount`. The
@@ -32,6 +34,15 @@ Vendored from commit `6cbf2f442079ded7fadf93dc59494e71e04f19bb` (2026-09-15).
   `parseUserKeyPassword` became async as a result, and its one call in
   `auth.ts` gained an `await`. Marked `LOCAL CHANGE` in `authWeb.ts`.
 
+- `accountApi.ts` types the parsed error body as `unknown` instead of `any`
+  (which makes its cast redundant, so it is gone),
+  and `apiClient.ts` reads the refresh response with `json<T>()` instead of a
+  cast. Type-only; no runtime change.
+
+- `sleep.ts` always rejects with an `Error` (the abort reason when it is one,
+  otherwise a wrapper) and schedules through `window.setTimeout` for Obsidian's
+  popout windows. Marked `LOCAL CHANGE` in the file.
+
 Every other runtime file is byte-identical to upstream.
 
 ## Re-vendoring
@@ -40,7 +51,7 @@ Every other runtime file is byte-identical to upstream.
     cp sdk/incubating/account/js/src/{accountAddress,accountApi,apiClient,addresses,auth,authWeb,index,logger,sessionCredentials,sleep,srp,telemetryPreference}.ts \
        src/proton/account/
 
-Note that this overwrites `apiClient.ts` and `authWeb.ts`; re-apply the `fetch`
+Note that this overwrites `apiClient.ts`, `authWeb.ts` and `sleep.ts`; re-apply the `fetch`
 option, or the plugin will fail every request with a CORS error, and the
 WebCrypto port, or the plugin will not load on mobile. Then run `npm run check-types`
 and widen the trimmed type files if new fields are referenced.

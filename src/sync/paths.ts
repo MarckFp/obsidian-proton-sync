@@ -66,7 +66,7 @@ export class PathFilter {
     constructor(
         userPatterns: string[],
         syncObsidianConfig: boolean,
-        private readonly configDir = '.obsidian',
+        private readonly configDir: string,
         pluginDir: string | null = null,
     ) {
         const patterns = [
@@ -110,7 +110,7 @@ function globToRegExp(pattern: string): RegExp {
     let source = '';
 
     for (let i = 0; i < normalized.length; i++) {
-        const char = normalized[i]!;
+        const char = normalized[i];
         if (char === '*') {
             if (normalized[i + 1] === '*') {
                 // `a/**` should also match `a` itself, so the preceding
@@ -165,4 +165,48 @@ function formatConflictTimestamp(when: Date): string {
 /** Strip characters that are illegal in a filename on Windows, macOS or Linux. */
 function sanitiseForFilename(value: string): string {
     return value.replace(/[\\/:*?"<>|]/g, '-').trim();
+}
+
+/**
+ * `(conflict 2026-09-30 1412 from laptop)` as written by
+ * {@link conflictCopyPath}, plus the ` 2`, ` 3`… that the engine adds when
+ * that name is already taken. The device name may contain anything but a path
+ * separator, parentheses included, so the match is anchored on the timestamp.
+ */
+const CONFLICT_SUFFIX = / \(conflict \d{4}-\d{2}-\d{2} \d{4}(?: from [^/]*)?\)(?: \d+)?$/;
+
+/** The note a conflict copy was made from, or null when `path` is not a conflict copy. */
+export function conflictCopyOriginal(path: string): string | null {
+    const { stem, extension } = splitExtension(path);
+    const match = CONFLICT_SUFFIX.exec(stem);
+    if (!match || match.index === 0 || stem.lastIndexOf('/') >= match.index) {
+        return null;
+    }
+    return `${stem.slice(0, match.index)}${extension}`;
+}
+
+/**
+ * A reason the exclusion list will not do what it looks like it does, or
+ * undefined when it is fine. Shown under the setting as the user types.
+ */
+export function checkExcludePatterns(patterns: string[]): string | undefined {
+    for (const raw of patterns) {
+        const pattern = raw.trim();
+        if (pattern === '') {
+            continue;
+        }
+        if (pattern.includes('\\')) {
+            return `"${pattern}": use / between folders, even on Windows.`;
+        }
+        if (pattern.startsWith('/')) {
+            return `"${pattern}": patterns are relative to the vault, so drop the leading /.`;
+        }
+        if (pattern.startsWith('./')) {
+            return `"${pattern}": patterns are relative to the vault already, so drop the ./.`;
+        }
+        if (/^\*+\/?$/.test(pattern) || pattern === '**/*') {
+            return `"${pattern}" would exclude the whole vault.`;
+        }
+    }
+    return undefined;
 }

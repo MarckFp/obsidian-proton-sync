@@ -1,6 +1,8 @@
 import { App, Modal, Notice, Setting } from 'obsidian';
 import { NodeType, type ProtonDriveClient } from '@protontech/drive-sdk';
 
+import { iterateChildNodes } from '../sync/drive';
+
 type Entry = { uid: string; name: string };
 
 /**
@@ -47,7 +49,7 @@ export class FolderPickerModal extends Modal {
     }
 
     private get current(): { uid: string; name: string } {
-        return this.stack[this.stack.length - 1]!;
+        return this.stack[this.stack.length - 1];
     }
 
     private get currentPath(): string {
@@ -60,7 +62,7 @@ export class FolderPickerModal extends Modal {
 
         const entries: Entry[] = [];
         try {
-            for await (const child of this.client.iterateFolderChildren(this.current.uid)) {
+            for await (const child of iterateChildNodes(this.client, this.current.uid, { type: NodeType.Folder })) {
                 if (child.type === NodeType.Folder && child.trashTime === undefined && child.name.ok) {
                     entries.push({ uid: child.uid, name: child.name.value });
                 }

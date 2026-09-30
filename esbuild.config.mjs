@@ -1,11 +1,13 @@
 import esbuild from 'esbuild';
 import process from 'node:process';
-import builtins from 'builtin-modules';
-import { existsSync, readFileSync } from 'node:fs';
+import { builtinModules as builtins } from 'node:module';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const production = process.argv[2] === 'production';
 
-const { version } = JSON.parse(readFileSync('./package.json', 'utf8'));
+// The manifest is what Obsidian reads and what the release workflow stamps, so
+// the version sent to Proton comes from there rather than from package.json.
+const { version } = JSON.parse(readFileSync('./manifest.json', 'utf8'));
 
 /*
  * `@protontech/crypto` imports `openpgp/lightweight`, a build that fetches the
@@ -36,6 +38,45 @@ function resolveOpenPgpBrowserBuild() {
 }
 
 const openpgpFullBuild = resolveOpenPgpBrowserBuild();
+
+/*
+ * A licence notice at the top of main.js, which is the file users actually
+ * receive. It names this plugin's licence and every third-party package that
+ * ended up in the bundle, read from the build's own metafile so the list can
+ * never drift from what is really inside. `/*!` marks it as a legal comment,
+ * which minifiers keep.
+ */
+const licenseBanner = {
+    name: 'license-banner',
+    setup(build) {
+        build.onEnd(async (result) => {
+            if (result.errors.length > 0 || !result.metafile) {
+                return;
+            }
+            const { license, author, homepage } = JSON.parse(readFileSync('package.json', 'utf8'));
+            const packages = new Map();
+            for (const input of Object.keys(result.metafile.inputs)) {
+                const match = input.match(/^(.*node_modules\/((?:@[^/]+\/)?[^/]+))\//);
+                if (!match || packages.has(match[2])) {
+                    continue;
+                }
+                const pkg = JSON.parse(readFileSync(`${match[1]}/package.json`, 'utf8'));
+                packages.set(match[2], `${pkg.name}@${pkg.version} (${pkg.license ?? 'see package'})`);
+            }
+            const lines = [
+                `Proton Drive Sync for Obsidian v${version}`,
+                `Copyright (C) 2026 ${author}. Licensed under ${license}; see LICENSE at:`,
+                homepage ?? '',
+                '',
+                'This file bundles the following third-party packages, under their own licences:',
+                ...[...packages.values()].sort().map((entry) => `  ${entry}`),
+            ];
+            const banner = `/*!\n${lines.map((line) => ` * ${line}`.trimEnd()).join('\n')}\n */\n`;
+            const outfile = build.initialOptions.outfile;
+            writeFileSync(outfile, banner + readFileSync(outfile, 'utf8'));
+        });
+    },
+};
 
 /*
  * `bcryptjs`, which `@protontech/crypto` uses for SRP, imports Node's `crypto`
@@ -70,7 +111,8 @@ const context = await esbuild.context({
     minify: production,
     treeShaking: true,
     logLevel: 'info',
-    plugins: [noNodeCrypto],
+    plugins: [noNodeCrypto, licenseBanner],
+    metafile: true,
     alias: {
         openpgp: openpgpFullBuild,
         'openpgp/lightweight': openpgpFullBuild,

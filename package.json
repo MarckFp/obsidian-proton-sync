@@ -1,26 +1,33 @@
 {
     "name": "obsidian-proton-drive-sync",
-    "version": "0.1.0",
+    "version": "0.2.1",
     "description": "Bidirectional sync between an Obsidian vault and Proton Drive, built on the official Proton Drive SDK.",
     "main": "main.js",
     "private": true,
-    "license": "MIT",
+    "license": "GPL-3.0-or-later",
     "scripts": {
         "dev": "node esbuild.config.mjs",
         "build": "tsc --noEmit && node esbuild.config.mjs production",
         "check-types": "tsc --noEmit",
-        "test": "node scripts/test.mjs"
+        "test": "node scripts/test.mjs",
+        "lint": "eslint --max-warnings 0"
     },
     "dependencies": {
         "@protontech/crypto": "^2.1.3",
         "@protontech/drive-sdk": "^0.21.3",
+        "core-js": "^3.50.0",
         "ky": "^1.14.3"
     },
     "devDependencies": {
+        "@eslint/js": "^9.39.5",
         "@types/node": "^22.15.21",
-        "builtin-modules": "^4.0.0",
         "esbuild": "^0.25.0",
+        "eslint": "^9.39.5",
+        "eslint-plugin-obsidianmd": "^0.4.2",
         "obsidian": "^1.13.1",
-        "typescript": "^5.9.3"
-    }
+        "typescript": "^5.9.3",
+        "typescript-eslint": "^8.71.0"
+    },
+    "homepage": "https://github.com/MarckFp/obsidian-proton-sync",
+    "author": "MarckFp"
 }

@@ -58,9 +58,9 @@ async function makeAccountApiError(error: unknown): Promise<AccountApiError> {
 
 async function parseErrorDetails(response: Response): Promise<ApiErrorDetails | undefined> {
     try {
-        const parsed = await response.json();
+        const parsed: unknown = await response.json();
         if (parsed !== null && typeof parsed === 'object') {
-            return parsed as ApiErrorDetails;
+            return parsed;
         }
     } catch {
         // Ignore parsing errors and fall back to generic error details.

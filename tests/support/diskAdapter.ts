@@ -54,5 +54,5 @@ export function diskVault() {
 
 /** Node's `require`, where the plugin expects to find it on desktop. */
 export function exposeNodeRequire(): void {
-    (globalThis as { window?: unknown }).window = { require };
+    Object.assign((globalThis as { window: object }).window, { require });
 }

@@ -81,3 +81,9 @@ export function mediaTypeOf(path: string): string {
     }
     return MEDIA_TYPES[name.slice(dot + 1).toLowerCase()] ?? DEFAULT_MEDIA_TYPE;
 }
+
+/** Whether a path holds text that can be compared or merged line by line. */
+export function isTextPath(path: string): boolean {
+    const mediaType = mediaTypeOf(path);
+    return mediaType.startsWith('text/') || mediaType === 'application/json' || mediaType === 'application/xml';
+}

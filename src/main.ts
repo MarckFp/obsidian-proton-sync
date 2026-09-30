@@ -3,18 +3,20 @@
 // load time.
 import './polyfills';
 
-import { Notice, Platform, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
+import { apiVersion, type App, Notice, Platform, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
 
 import { Credentials } from './proton/credentials';
 import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
 import { ProtonSession } from './proton/session';
 import { DEFAULT_SETTINGS, type PluginSettings } from './settings';
-import { SyncEngine, type ConflictEvent, type SyncSummary } from './sync/engine';
+import { SyncEngine, type ConflictEvent, type SyncPlan, type SyncSummary } from './sync/engine';
 import { SyncState } from './sync/state';
-import { Logger } from './util/logger';
+import { formatLogEntries, Logger } from './util/logger';
+import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor } from './ui/compare';
 import { showConflictNotice } from './ui/conflictNotice';
 import { ConflictsModal } from './ui/conflictsModal';
-import { ProtonDriveSyncSettingsTab } from './ui/settingsTab';
+import { FirstSyncModal } from './ui/firstSyncModal';
+import { CONFLICT_POLICIES, ProtonDriveSyncSettingsTab } from './ui/settingsTab';
 import { SetupModal } from './ui/setupModal';
 import { StatusBar } from './ui/statusBar';
 
@@ -26,6 +28,23 @@ const CLIENT_UID_KEY = 'proton-drive-sync-client-uid';
 
 /** Conflicts found within this long of each other share one notice. */
 const CONFLICT_NOTICE_DELAY_MS = 1500;
+
+/** How often the status bar's "synced 5m ago" is brought up to date. */
+const STATUS_REFRESH_MS = 30_000;
+
+/**
+ * The Network Information API, where the WebView has it: Android does, iOS
+ * does not. Only `type` is used, to tell cellular from Wi-Fi.
+ */
+type NetworkConnection = {
+    type?: string;
+    addEventListener(type: 'change', listener: () => void): void;
+    removeEventListener(type: 'change', listener: () => void): void;
+};
+
+function networkConnection(): NetworkConnection | undefined {
+    return (navigator as Navigator & { connection?: NetworkConnection }).connection;
+}
 
 export default class ProtonDriveSyncPlugin extends Plugin {
     // Obsidian declares `settings?: unknown` on Plugin; this narrows it.
@@ -43,7 +62,13 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         await this.loadSettings();
 
         this.logger = new Logger(this.settings.logLevel);
-        this.statusBar = new StatusBar(this.addStatusBarItem(), () => void this.engine.syncNow());
+        this.statusBar = new StatusBar(this.addStatusBarItem(), {
+            syncNow: () => void this.syncNowOrSetUp(),
+            togglePause: () => void this.setPaused(!this.settings.paused),
+            showConflicts: () => new ConflictsModal(this.app, this).open(),
+            openSettings: () => this.openSettings(),
+        });
+        this.registerInterval(window.setInterval(() => this.statusBar.refresh(), STATUS_REFRESH_MS));
 
         const clientUid = this.installationId();
         const protonLogger = this.logger.getLogger('proton');
@@ -72,6 +97,10 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 onConflict: (event) => this.onConflict(event),
             },
             { configDir: this.app.vault.configDir, pluginDir: this.pluginDir() },
+            {
+                isMobile: Platform.isMobileApp,
+                isMetered: () => networkConnection()?.type === 'cellular',
+            },
         );
 
         this.addSettingTab(new ProtonDriveSyncSettingsTab(this.app, this));
@@ -91,11 +120,13 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         });
     }
 
-    override async onunload(): Promise<void> {
+    override onunload(): void {
         if (this.conflictNoticeTimer !== null) {
             window.clearTimeout(this.conflictNoticeTimer);
         }
-        await this.engine.stop();
+        // Obsidian does not wait for unload, so there is nothing to hand the
+        // promise to; `stop` cancels timers synchronously before it awaits.
+        void this.engine.stop();
     }
 
     openSetup(): void {
@@ -139,6 +170,42 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         await this.connect();
     }
 
+    /**
+     * Pause or resume, remembering the choice across restarts.
+     *
+     * Resuming into a sync that has never run (paused from the first-sync
+     * preview, say) shows the preview again, since nothing has changed that
+     * would make it less of a surprise.
+     */
+    async setPaused(paused: boolean): Promise<void> {
+        this.settings.paused = paused;
+        await this.saveSettings();
+        if (paused) {
+            this.engine.pause();
+            this.notify('syncing paused.');
+            return;
+        }
+        if (this.isConfigured() && this.state.paths().length === 0 && !(await this.confirmFirstSync())) {
+            this.settings.paused = true;
+            await this.saveSettings();
+            return;
+        }
+        this.notify('syncing resumed.');
+        await this.engine.resume();
+    }
+
+    /** Everything this device logged recently, with enough context to go in a bug report. */
+    async copyLog(): Promise<void> {
+        const header = [
+            `Proton Drive Sync ${this.manifest.version}`,
+            `Obsidian ${apiVersion}, ${Platform.isMobileApp ? 'mobile' : 'desktop'}`,
+            `Status: ${this.engine.getSummary().status}`,
+            '',
+        ];
+        await navigator.clipboard.writeText(header.join('\n') + formatLogEntries(this.logger.getEntries()));
+        new Notice('Sync log copied. It lists file names; check it before sharing.');
+    }
+
     notify(message: string): void {
         new Notice(`Proton Drive Sync: ${message}`);
     }
@@ -168,7 +235,59 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         }
 
         await this.state.load(this.session.accountEmail ?? null, this.settings.remoteFolderUid);
+        if (!this.settings.paused && this.state.paths().length === 0 && !(await this.confirmFirstSync())) {
+            this.settings.paused = true;
+            await this.saveSettings();
+        }
         await this.engine.start(this.session.getClient(), this.settings.remoteFolderUid);
+    }
+
+    /**
+     * Before a first sync that mixes two sets of files, show what it will do
+     * and let the user hold off. Resolves true to go ahead.
+     *
+     * Goes ahead without asking when one side is empty or both already agree,
+     * and also when the preview itself fails: a first sync has no record of
+     * earlier state, so it can add and keep copies but never delete.
+     */
+    private async confirmFirstSync(): Promise<boolean> {
+        const rootUid = this.settings.remoteFolderUid;
+        if (!rootUid) {
+            return true;
+        }
+        this.statusBar.update({ ...this.engine.getSummary(), status: 'syncing' });
+
+        let plan: SyncPlan;
+        try {
+            plan = await this.engine.plan(this.session.getClient(), rootUid);
+        } catch (error) {
+            this.logger.warn('Could not preview the first sync; going ahead, since it deletes nothing', error);
+            return true;
+        }
+        const changes = plan.uploads.length + plan.downloads.length + plan.conflicts.length + plan.removals.length;
+        if (plan.localFiles === 0 || plan.remoteFiles === 0 || changes === 0) {
+            return true;
+        }
+
+        const folderName = this.settings.remoteFolderPath ?? 'the Drive folder';
+        const policy = CONFLICT_POLICIES[this.settings.conflictPolicy];
+        return new Promise((resolve) => {
+            new FirstSyncModal(this.app, plan, folderName, policy.toLowerCase(), resolve).open();
+        });
+    }
+
+    private async syncNowOrSetUp(): Promise<void> {
+        if (!this.isConfigured()) {
+            this.openSetup();
+            return;
+        }
+        await this.engine.syncNow();
+    }
+
+    private openSettings(): void {
+        const setting = (this.app as App & { setting?: { open(): void; openTabById(id: string): void } }).setting;
+        setting?.open();
+        setting?.openTabById(this.manifest.id);
     }
 
     /** Tear the sync down and bring it back with the current configuration. */
@@ -219,18 +338,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.addCommand({
             id: 'sync-now',
             name: 'Sync now',
-            callback: () => {
-                if (!this.isConfigured()) {
-                    this.openSetup();
-                    return;
-                }
-                void this.engine.syncNow();
-            },
+            callback: () => void this.syncNowOrSetUp(),
         });
 
         this.addCommand({
             id: 'open-setup',
-            name: 'Set up Proton Drive Sync',
+            name: 'Open setup assistant',
             callback: () => this.openSetup(),
         });
 
@@ -238,6 +351,55 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             id: 'show-conflicts',
             name: 'Show sync conflicts',
             callback: () => new ConflictsModal(this.app, this).open(),
+        });
+
+        this.addCommand({
+            id: 'pause-sync',
+            name: 'Pause syncing',
+            checkCallback: (checking) => {
+                if (this.settings.paused) {
+                    return false;
+                }
+                if (!checking) {
+                    void this.setPaused(true);
+                }
+                return true;
+            },
+        });
+
+        this.addCommand({
+            id: 'resume-sync',
+            name: 'Resume syncing',
+            checkCallback: (checking) => {
+                if (!this.settings.paused) {
+                    return false;
+                }
+                if (!checking) {
+                    void this.setPaused(false);
+                }
+                return true;
+            },
+        });
+
+        this.addCommand({
+            id: 'compare-conflict-copy',
+            name: 'Compare with conflict copy',
+            checkCallback: (checking) => {
+                const file = this.app.workspace.getActiveFile();
+                if (!file || conflictPairsFor(this.app, file).length === 0) {
+                    return false;
+                }
+                if (!checking) {
+                    compareConflictCopyOf(this.app, file);
+                }
+                return true;
+            },
+        });
+
+        this.addCommand({
+            id: 'copy-log',
+            name: 'Copy sync log',
+            callback: () => void this.copyLog(),
         });
     }
 
@@ -285,9 +447,10 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         }
         this.conflictNoticeTimer = window.setTimeout(() => {
             this.conflictNoticeTimer = null;
-            showConflictNotice(this.app, this.pendingConflicts.splice(0), () =>
-                new ConflictsModal(this.app, this).open(),
-            );
+            showConflictNotice(this.app, this.pendingConflicts.splice(0), {
+                reviewConflicts: () => new ConflictsModal(this.app, this).open(),
+                compare: (path, copyPath) => compareWithConflictCopy(this.app, path, copyPath),
+            });
         }, CONFLICT_NOTICE_DELAY_MS);
     }
 
@@ -308,6 +471,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             }
         });
         this.registerDomEvent(window, 'online', () => this.engine.pollNow());
+
+        // Moving between Wi-Fi and mobile data, for the "Wi-Fi only" setting.
+        const connection = networkConnection();
+        if (connection) {
+            const onChange = () => this.engine.pollNow();
+            connection.addEventListener('change', onChange);
+            this.register(() => connection.removeEventListener('change', onChange));
+        }
     }
 
     /**

@@ -5,6 +5,8 @@ import { mediaTypeOf } from '../src/sync/media';
 import {
     PathFilter,
     ancestorPaths,
+    checkExcludePatterns,
+    conflictCopyOriginal,
     conflictCopyPath,
     isWithin,
     replacePrefix,
@@ -12,7 +14,7 @@ import {
 } from '../src/sync/paths';
 
 describe('PathFilter — built-in exclusions', () => {
-    const filter = new PathFilter([], true);
+    const filter = new PathFilter([], true, '.obsidian');
 
     it('excludes the workspace layout but keeps the rest of .obsidian', () => {
         assert.equal(filter.isExcluded('.obsidian/workspace.json'), true);
@@ -62,7 +64,7 @@ describe('PathFilter — the config folder', () => {
 
 describe('PathFilter — .obsidian toggle', () => {
     it('excludes the whole config directory when config sync is off', () => {
-        const filter = new PathFilter([], false);
+        const filter = new PathFilter([], false, '.obsidian');
         assert.equal(filter.isExcluded('.obsidian'), true);
         assert.equal(filter.isExcluded('.obsidian/appearance.json'), true);
         assert.equal(filter.isExcluded('.obsidian/plugins/dataview/main.js'), true);
@@ -71,7 +73,7 @@ describe('PathFilter — .obsidian toggle', () => {
 
 describe('PathFilter — user patterns', () => {
     it('matches a bare folder name and everything below it', () => {
-        const filter = new PathFilter(['Private/'], true);
+        const filter = new PathFilter(['Private/'], true, '.obsidian');
         assert.equal(filter.isExcluded('Private'), true);
         assert.equal(filter.isExcluded('Private/secret.md'), true);
         assert.equal(filter.isExcluded('Private/deep/secret.md'), true);
@@ -79,24 +81,24 @@ describe('PathFilter — user patterns', () => {
     });
 
     it('matches an extension glob at one level only', () => {
-        const filter = new PathFilter(['*.pdf'], true);
+        const filter = new PathFilter(['*.pdf'], true, '.obsidian');
         assert.equal(filter.isExcluded('manual.pdf'), true);
         assert.equal(filter.isExcluded('docs/manual.pdf'), false);
     });
 
     it('matches an extension glob at any depth with a double star', () => {
-        const filter = new PathFilter(['**/*.pdf'], true);
+        const filter = new PathFilter(['**/*.pdf'], true, '.obsidian');
         assert.equal(filter.isExcluded('docs/deep/manual.pdf'), true);
     });
 
     it('does not treat pattern punctuation as a regular expression', () => {
-        const filter = new PathFilter(['notes (old)/**'], true);
+        const filter = new PathFilter(['notes (old)/**'], true, '.obsidian');
         assert.equal(filter.isExcluded('notes (old)/a.md'), true);
         assert.equal(filter.isExcluded('notesXold/a.md'), false);
     });
 
     it('excludes a file whose parent folder is excluded', () => {
-        const filter = new PathFilter(['Archive/'], true);
+        const filter = new PathFilter(['Archive/'], true, '.obsidian');
         assert.equal(filter.isExcludedWithAncestors('Archive/2024/note.md'), true);
         assert.equal(filter.isExcludedWithAncestors('Active/2024/note.md'), false);
     });
@@ -162,5 +164,38 @@ describe('mediaTypeOf', () => {
         assert.equal(mediaTypeOf('data/blob.xyz'), 'application/octet-stream');
         assert.equal(mediaTypeOf('Makefile'), 'application/octet-stream');
         assert.equal(mediaTypeOf('.hidden'), 'application/octet-stream');
+    });
+});
+
+describe('conflictCopyOriginal', () => {
+    it('finds the note a conflict copy was made from', () => {
+        const copy = conflictCopyPath('Notes/Plan.md', 'laptop', new Date(2026, 8, 30, 14, 5));
+        assert.equal(conflictCopyOriginal(copy), 'Notes/Plan.md');
+    });
+
+    it('copes with a numbered copy and a device name with parentheses', () => {
+        assert.equal(conflictCopyOriginal('Plan (conflict 2026-09-30 1405 from Work (old)) 2.md'), 'Plan.md');
+    });
+
+    it('works without a device name or an extension', () => {
+        assert.equal(conflictCopyOriginal('Folder/README (conflict 2026-09-30 1405)'), 'Folder/README');
+    });
+
+    it('returns null for an ordinary file', () => {
+        assert.equal(conflictCopyOriginal('Notes/Plan (draft).md'), null);
+        assert.equal(conflictCopyOriginal('(conflict 2026-09-30 1405).md'), null);
+    });
+});
+
+describe('checkExcludePatterns', () => {
+    it('accepts ordinary patterns', () => {
+        assert.equal(checkExcludePatterns(['Private/', '**/*.pdf', '']), undefined);
+    });
+
+    it('explains patterns that would not match what they look like', () => {
+        assert.match(checkExcludePatterns(['Private\\Notes'])!, /use \//);
+        assert.match(checkExcludePatterns(['/Private'])!, /leading \//);
+        assert.match(checkExcludePatterns(['./Private'])!, /\.\//);
+        assert.match(checkExcludePatterns(['**'])!, /whole vault/);
     });
 });

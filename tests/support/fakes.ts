@@ -190,7 +190,7 @@ export const SYNC_ROOT = 'sync-root';
 
 export class FakeDrive {
     readonly nodes = new Map<string, FakeNode>();
-    /** Makes lookups of individual nodes fail, as a dropped connection mid-sync would. Listings still work. */
+    /** Makes node lookups fail, as a dropped connection mid-sync would. Listing child uids still works; resolving them is a lookup. */
     failLookups = false;
     /**
      * Runs while an upload of a new revision is in flight, after the plugin
@@ -204,6 +204,8 @@ export class FakeDrive {
     failEventsAfter: number | null = null;
     /** How many nodes have been looked up one by one or in batches. */
     lookups = 0;
+    /** Names of uploaded files, in the order their uploads completed. */
+    readonly uploadLog: string[] = [];
     private readonly events: {
         type: DriveEventType;
         nodeUid: string;
@@ -323,10 +325,10 @@ export class FakeDrive {
                 }
                 return chain;
             },
-            async *iterateFolderChildren(uid: string) {
+            async *iterateFolderChildrenNodeUids(uid: string) {
                 for (const node of drive.nodes.values()) {
                     if (node.parentUid === uid) {
-                        yield drive.entity(node);
+                        yield node.uid;
                     }
                 }
             },
@@ -431,7 +433,11 @@ export class FakeDrive {
     private uploader(metadata: UploadMetadata, target: () => FakeNode) {
         const drive = this;
         return {
-            async uploadFromStream(stream: ReadableStream<Uint8Array>) {
+            async uploadFromStream(
+                stream: ReadableStream<Uint8Array>,
+                _thumbnails: unknown,
+                onProgress?: (bytes: number) => void,
+            ) {
                 const chunks: Uint8Array[] = [];
                 const reader = stream.getReader();
                 for (let read = await reader.read(); !read.done; read = await reader.read()) {
@@ -446,8 +452,10 @@ export class FakeDrive {
                 if (sha1(data) !== metadata.expectedSha1 || data.byteLength !== metadata.expectedSize) {
                     throw new Error('Integrity check failed');
                 }
+                onProgress?.(data.byteLength);
                 const node = target();
                 drive.addRevision(node, data, metadata.modificationTime);
+                drive.uploadLog.push(node.name);
                 return { completion: async () => ({ nodeUid: node.uid, nodeRevisionUid: node.revision!.uid }) };
             },
         };

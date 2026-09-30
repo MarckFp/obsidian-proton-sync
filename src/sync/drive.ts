@@ -26,6 +26,48 @@ export type RemoteTree = {
 };
 
 /**
+ * How many child uids are resolved per `iterateNodes` call. Large enough that
+ * the SDK's own batching (30 per request) runs at full width, small enough
+ * that `hasLiveChildren` can stop early without loading a whole big folder.
+ */
+const CHILD_BATCH_SIZE = 90;
+
+/**
+ * The children of a folder, as nodes.
+ *
+ * The SDK deprecated `iterateFolderChildren` in favour of listing uids and
+ * resolving them with `iterateNodes`, which serves fresh nodes from its cache
+ * and batch-loads the rest, the same work the old call did internally. A child
+ * that disappears between listing and loading comes back as missing and is
+ * skipped: it is no longer in the folder.
+ */
+export async function* iterateChildNodes(
+    client: Pick<ProtonDriveClient, 'iterateFolderChildrenNodeUids' | 'iterateNodes'>,
+    parentUid: string,
+    filterOptions?: { type?: NodeType },
+): AsyncGenerator<NodeEntity> {
+    let batch: string[] = [];
+    for await (const uid of client.iterateFolderChildrenNodeUids(parentUid, filterOptions)) {
+        batch.push(uid);
+        if (batch.length >= CHILD_BATCH_SIZE) {
+            yield* resolveNodes(client, batch);
+            batch = [];
+        }
+    }
+    if (batch.length > 0) {
+        yield* resolveNodes(client, batch);
+    }
+}
+
+async function* resolveNodes(client: Pick<ProtonDriveClient, 'iterateNodes'>, uids: string[]): AsyncGenerator<NodeEntity> {
+    for await (const node of client.iterateNodes(uids)) {
+        if (!('missingUid' in node)) {
+            yield node;
+        }
+    }
+}
+
+/**
  * The Drive side of the sync, wrapping `ProtonDriveClient` in the vocabulary
  * the engine uses: vault-relative paths rather than node uids.
  */
@@ -57,11 +99,8 @@ export class DriveIO {
             skipped: [],
         };
 
-        const queue: { uid: string; path: string }[] = [{ uid: rootUid, path: '' }];
-
-        while (queue.length > 0) {
-            const folder = queue.pop()!;
-            for await (const child of this.client.iterateFolderChildren(folder.uid)) {
+        const listFolder = async (folder: { uid: string; path: string }, found: (subfolder: { uid: string; path: string }) => void) => {
+            for await (const child of iterateChildNodes(this.client, folder.uid)) {
                 if (child.trashTime !== undefined) {
                     continue;
                 }
@@ -81,7 +120,7 @@ export class DriveIO {
                 if (child.type === NodeType.Folder) {
                     tree.folders.set(path, child.uid);
                     if (shouldDescend(path)) {
-                        queue.push({ uid: child.uid, path });
+                        found({ uid: child.uid, path });
                     }
                     continue;
                 }
@@ -94,8 +133,9 @@ export class DriveIO {
                     tree.files.set(path, remote);
                 }
             }
-        }
+        };
 
+        await walkConcurrently({ uid: rootUid, path: '' }, LIST_CONCURRENCY, listFolder);
         return tree;
     }
 
@@ -165,7 +205,7 @@ export class DriveIO {
      * already knows.
      */
     async *iterateChildren(parentUid: string): AsyncGenerator<{ node: NodeEntity; name: string }> {
-        for await (const child of this.client.iterateFolderChildren(parentUid)) {
+        for await (const child of iterateChildNodes(this.client, parentUid)) {
             if (child.trashTime !== undefined) {
                 continue;
             }
@@ -181,7 +221,7 @@ export class DriveIO {
      * whose names cannot be decrypted count: they are still someone's files.
      */
     async hasLiveChildren(folderUid: string): Promise<boolean> {
-        for await (const child of this.client.iterateFolderChildren(folderUid)) {
+        for await (const child of iterateChildNodes(this.client, folderUid)) {
             if (child.trashTime === undefined) {
                 return true;
             }
@@ -209,10 +249,11 @@ export class DriveIO {
         name: string,
         source: UploadSource,
         signal?: AbortSignal,
+        onProgress?: (bytes: number) => void,
     ): Promise<{ nodeUid: string; revisionUid: string }> {
         return this.withThumbnailFallback(source, async (stream, thumbnails) => {
             const uploader = await this.client.getFileUploader(parentUid, name, uploadMetadata(source), signal);
-            const controller = await uploader.uploadFromStream(stream, thumbnails);
+            const controller = await uploader.uploadFromStream(stream, thumbnails, onProgress);
             const { nodeUid, nodeRevisionUid } = await controller.completion();
             return { nodeUid, revisionUid: nodeRevisionUid };
         });
@@ -222,10 +263,11 @@ export class DriveIO {
         nodeUid: string,
         source: UploadSource,
         signal?: AbortSignal,
+        onProgress?: (bytes: number) => void,
     ): Promise<{ nodeUid: string; revisionUid: string }> {
         return this.withThumbnailFallback(source, async (stream, thumbnails) => {
             const uploader = await this.client.getFileRevisionUploader(nodeUid, uploadMetadata(source), signal);
-            const controller = await uploader.uploadFromStream(stream, thumbnails);
+            const controller = await uploader.uploadFromStream(stream, thumbnails, onProgress);
             const result = await controller.completion();
             return { nodeUid: result.nodeUid, revisionUid: result.nodeRevisionUid };
         });
@@ -256,13 +298,18 @@ export class DriveIO {
     }
 
     /** Download the active revision into memory. Meant for files of modest size. */
-    async downloadFile(nodeUid: string, signal?: AbortSignal): Promise<ArrayBuffer> {
-        return collect((sink) => this.downloadTo(nodeUid, sink, signal));
+    async downloadFile(nodeUid: string, signal?: AbortSignal, onProgress?: (bytes: number) => void): Promise<ArrayBuffer> {
+        return collect((sink) => this.downloadTo(nodeUid, sink, signal, onProgress));
     }
 
     /** Stream the active revision into `sink`, so large files never sit in memory whole. */
-    async downloadTo(nodeUid: string, sink: WritableStream<Uint8Array>, signal?: AbortSignal): Promise<void> {
-        await completeDownload(await this.client.getFileDownloader(nodeUid, signal), sink);
+    async downloadTo(
+        nodeUid: string,
+        sink: WritableStream<Uint8Array>,
+        signal?: AbortSignal,
+        onProgress?: (bytes: number) => void,
+    ): Promise<void> {
+        await completeDownload(await this.client.getFileDownloader(nodeUid, signal), sink, onProgress);
     }
 
     /**
@@ -274,12 +321,21 @@ export class DriveIO {
      * keeping its own copy of every file. Throws when the revision has been
      * pruned, which Drive does depending on the plan's revision history.
      */
-    async downloadRevision(revisionUid: string, signal?: AbortSignal): Promise<ArrayBuffer> {
-        return collect((sink) => this.downloadRevisionTo(revisionUid, sink, signal));
+    async downloadRevision(
+        revisionUid: string,
+        signal?: AbortSignal,
+        onProgress?: (bytes: number) => void,
+    ): Promise<ArrayBuffer> {
+        return collect((sink) => this.downloadRevisionTo(revisionUid, sink, signal, onProgress));
     }
 
-    async downloadRevisionTo(revisionUid: string, sink: WritableStream<Uint8Array>, signal?: AbortSignal): Promise<void> {
-        await completeDownload(await this.client.getFileRevisionDownloader(revisionUid, signal), sink);
+    async downloadRevisionTo(
+        revisionUid: string,
+        sink: WritableStream<Uint8Array>,
+        signal?: AbortSignal,
+        onProgress?: (bytes: number) => void,
+    ): Promise<void> {
+        await completeDownload(await this.client.getFileRevisionDownloader(revisionUid, signal), sink, onProgress);
     }
 
     /**
@@ -351,6 +407,55 @@ export class DriveIO {
 /** Nodes per `iterateNodes` request. */
 const LOOKUP_BATCH = 100;
 
+/**
+ * Folders listed at once while walking the tree. A listing is a few small
+ * requests, so a handful in flight cuts a first sync of a deep vault several
+ * times over, while staying far from what Proton's rate limits would notice.
+ */
+const LIST_CONCURRENCY = 4;
+
+/**
+ * Breadth-first walk with up to `concurrency` folders in flight. `visit`
+ * reports each subfolder to descend into; the walk ends when every reported
+ * folder has been visited, and stops at the first failure.
+ */
+export async function walkConcurrently<T>(
+    root: T,
+    concurrency: number,
+    visit: (folder: T, found: (subfolder: T) => void) => Promise<void>,
+): Promise<void> {
+    const queue: T[] = [root];
+    let active = 0;
+    let failed = false;
+
+    await new Promise<void>((resolve, reject) => {
+        const pump = () => {
+            if (failed) {
+                return;
+            }
+            if (queue.length === 0 && active === 0) {
+                resolve();
+                return;
+            }
+            while (active < Math.max(1, concurrency) && queue.length > 0) {
+                const folder = queue.shift()!;
+                active++;
+                visit(folder, (subfolder) => queue.push(subfolder)).then(
+                    () => {
+                        active--;
+                        pump();
+                    },
+                    (error: unknown) => {
+                        failed = true;
+                        reject(error instanceof Error ? error : new Error(String(error)));
+                    },
+                );
+            }
+        };
+        pump();
+    });
+}
+
 export type NodeLocation =
     /** The node, or a folder above it, is in the trash or no longer exists. */
     | { kind: 'deleted' }
@@ -412,8 +517,12 @@ function toRemoteState(node: NodeEntity): RemoteState | undefined {
  * refused rather than silently written into the vault under the user's own
  * name.
  */
-async function completeDownload(downloader: FileDownloader, sink: WritableStream<Uint8Array>): Promise<void> {
-    const controller = downloader.downloadToStream(sink);
+async function completeDownload(
+    downloader: FileDownloader,
+    sink: WritableStream<Uint8Array>,
+    onProgress?: (bytes: number) => void,
+): Promise<void> {
+    const controller = downloader.downloadToStream(sink, onProgress);
     try {
         await controller.completion();
     } catch (error) {

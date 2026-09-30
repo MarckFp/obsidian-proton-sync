@@ -4,7 +4,7 @@ import { afterEach, describe, it } from 'node:test';
 import { DriveEventType, type ProtonDriveClient } from '@protontech/drive-sdk';
 
 import { DEFAULT_SETTINGS, type PluginSettings } from '../src/settings';
-import { SyncEngine, type ConflictEvent } from '../src/sync/engine';
+import { SyncEngine, type ConflictEvent, type EngineEnvironment } from '../src/sync/engine';
 import { SyncState } from '../src/sync/state';
 import { Logger } from '../src/util/logger';
 import { FakeDrive, MemoryVault, SYNC_ROOT, VOLUME_ROOT } from './support/fakes';
@@ -18,7 +18,13 @@ afterEach(async () => {
 });
 
 async function setup(
-    options: { vault?: MemoryVault; drive?: FakeDrive; settings?: Partial<PluginSettings> } = {},
+    options: {
+        vault?: MemoryVault;
+        drive?: FakeDrive;
+        settings?: Partial<PluginSettings>;
+        environment?: EngineEnvironment;
+        start?: boolean;
+    } = {},
 ) {
     const vault = options.vault ?? new MemoryVault();
     const drive = options.drive ?? new FakeDrive();
@@ -39,9 +45,12 @@ async function setup(
         SILENT,
         { onChange: () => undefined, onConflict: (event) => conflicts.push(event) },
         { configDir: '.obsidian', pluginDir: PLUGIN_DIR },
+        options.environment,
     );
     running.push(engine);
-    await engine.start(drive.client() as unknown as ProtonDriveClient, SYNC_ROOT);
+    if (options.start ?? true) {
+        await engine.start(drive.client() as unknown as ProtonDriveClient, SYNC_ROOT);
+    }
 
     /** Wait for batched vault events to be delivered and processed. */
     const settled = async () => {
@@ -50,7 +59,7 @@ async function setup(
             await (engine as unknown as { queue: Promise<void> }).queue;
         }
     };
-    return { vault, drive, state, engine, conflicts, settled };
+    return { vault, drive, state, engine, conflicts, settled, settings };
 }
 
 describe('SyncEngine — renaming a new note', () => {
@@ -669,5 +678,151 @@ describe('SyncEngine — review fixes', () => {
         engine.onVaultChange('late.md');
         await settled();
         assert.equal(drive.text('late.md'), undefined, 'still waiting out the new debounce');
+    });
+});
+
+describe('SyncEngine — pausing', () => {
+    it('ignores changes while paused and catches up on resume', async () => {
+        const { vault, drive, engine, settled } = await setup();
+        engine.pause();
+        assert.equal(engine.getSummary().status, 'paused');
+
+        vault.write('Paused.md', 'written while paused');
+        engine.onVaultChange('Paused.md');
+        drive.put('Remote.md', 'from another device');
+        await settled();
+        assert.equal(drive.text('Paused.md'), undefined);
+        assert.equal(vault.read('Remote.md'), undefined);
+
+        await engine.resume();
+        await settled();
+        assert.equal(drive.text('Paused.md'), 'written while paused');
+        assert.equal(vault.read('Remote.md'), 'from another device');
+        assert.equal(engine.getSummary().status, 'idle');
+    });
+
+    it('stays paused across a restart, doing nothing until resumed', async () => {
+        const drive = new FakeDrive();
+        drive.put('Remote.md', 'waiting');
+        const { vault, engine, settled } = await setup({ drive, settings: { paused: true } });
+        await settled();
+        assert.equal(vault.read('Remote.md'), undefined);
+        assert.equal(engine.getSummary().status, 'paused');
+
+        await engine.resume();
+        await settled();
+        assert.equal(vault.read('Remote.md'), 'waiting');
+    });
+});
+
+describe('SyncEngine — Wi-Fi only', () => {
+    it('holds the sync on mobile data and runs it once back on Wi-Fi', async () => {
+        let metered = true;
+        const drive = new FakeDrive();
+        drive.put('Remote.md', 'hello');
+        const { vault, engine, settled } = await setup({
+            drive,
+            settings: { wifiOnly: true },
+            environment: { isMobile: true, isMetered: () => metered },
+        });
+        await settled();
+        assert.equal(vault.read('Remote.md'), undefined);
+        assert.equal(engine.getSummary().status, 'waiting-for-wifi');
+
+        metered = false;
+        engine.pollNow();
+        await settled();
+        assert.equal(vault.read('Remote.md'), 'hello');
+    });
+
+    it('has no effect on desktop', async () => {
+        const drive = new FakeDrive();
+        drive.put('Remote.md', 'hello');
+        const { vault, settled } = await setup({
+            drive,
+            settings: { wifiOnly: true },
+            environment: { isMobile: false, isMetered: () => true },
+        });
+        await settled();
+        assert.equal(vault.read('Remote.md'), 'hello');
+    });
+});
+
+describe('SyncEngine — size limits', () => {
+    const big = 'x'.repeat(2 * 1024 * 1024);
+
+    it('leaves files over the limit on Drive instead of downloading them', async () => {
+        const drive = new FakeDrive();
+        drive.put('big.bin', big);
+        drive.put('small.md', 'small');
+        const { vault, settled } = await setup({ drive, settings: { maxFileSizeMb: 1 } });
+        await settled();
+        assert.equal(vault.read('big.bin'), undefined);
+        assert.equal(vault.read('small.md'), 'small');
+    });
+
+    it('applies the mobile limit on mobile only', async () => {
+        for (const isMobile of [false, true]) {
+            const drive = new FakeDrive();
+            drive.put('big.bin', big);
+            const { vault, settled } = await setup({
+                drive,
+                settings: { mobileMaxFileSizeMb: 1 },
+                environment: { isMobile, isMetered: () => false },
+            });
+            await settled();
+            assert.equal(vault.read('big.bin') !== undefined, !isMobile, `isMobile: ${isMobile}`);
+        }
+    });
+});
+
+describe('SyncEngine — ordering and scope', () => {
+    it('uploads notes before attachments', async () => {
+        const vault = new MemoryVault();
+        vault.write('a-picture.png', 'not really a picture');
+        vault.write('z-note.md', 'a note');
+        const { drive, settled } = await setup({ vault, settings: { transferConcurrency: 1 } });
+        await settled();
+        assert.deepEqual(drive.uploadLog, ['z-note.md', 'a-picture.png']);
+    });
+
+    it('syncs newly included files when the exclusions change on the same settings object', async () => {
+        const vault = new MemoryVault();
+        vault.write('Private/secret.md', 'now shared');
+        const { drive, engine, settings, settled } = await setup({ vault, settings: { excludePatterns: ['Private/'] } });
+        await settled();
+        assert.equal(drive.text('Private/secret.md'), undefined);
+
+        settings.excludePatterns = [];
+        engine.updateSettings(settings);
+        await settled();
+        assert.equal(drive.text('Private/secret.md'), 'now shared');
+    });
+});
+
+describe('SyncEngine — first-sync plan', () => {
+    it('predicts the first sync without changing either side', async () => {
+        const vault = new MemoryVault();
+        const drive = new FakeDrive();
+        vault.write('local.md', 'only here');
+        drive.put('remote.md', 'only there');
+        vault.write('same.md', 'identical');
+        drive.put('same.md', 'identical');
+        vault.write('both.md', 'this version');
+        drive.put('both.md', 'that version');
+
+        const { engine } = await setup({ vault, drive, start: false });
+        const plan = await engine.plan(drive.client() as unknown as ProtonDriveClient, SYNC_ROOT);
+
+        assert.equal(plan.localFiles, 3);
+        assert.equal(plan.remoteFiles, 3);
+        assert.deepEqual(plan.uploads, ['local.md']);
+        assert.deepEqual(plan.downloads, ['remote.md']);
+        assert.deepEqual(plan.conflicts, ['both.md']);
+        assert.equal(plan.unchanged, 1);
+        assert.deepEqual(plan.removals, []);
+
+        assert.equal(vault.read('remote.md'), undefined);
+        assert.equal(drive.text('local.md'), undefined);
     });
 });

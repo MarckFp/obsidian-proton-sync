@@ -14,7 +14,7 @@
  */
 
 /** Above this many differing lines, decline rather than run an O(n·m) diff. */
-const MAX_DIFF_LINES = 5000;
+export const MAX_DIFF_LINES = 5000;
 
 export type MergeResult =
     | { merged: true; text: string }
@@ -209,7 +209,7 @@ function diffRegions(base: string[], other: string[]): Region[] | null {
 }
 
 /** Matched index pairs, ascending. Standard quadratic LCS, bounded by the caller. */
-function longestCommonSubsequence(a: string[], b: string[]): [number, number][] {
+export function longestCommonSubsequence(a: string[], b: string[]): [number, number][] {
     const width = b.length + 1;
     const lengths = new Uint32Array((a.length + 1) * width);
 
@@ -217,8 +217,8 @@ function longestCommonSubsequence(a: string[], b: string[]): [number, number][] 
         for (let j = b.length - 1; j >= 0; j--) {
             lengths[i * width + j] =
                 a[i] === b[j]
-                    ? lengths[(i + 1) * width + j + 1]! + 1
-                    : Math.max(lengths[(i + 1) * width + j]!, lengths[i * width + j + 1]!);
+                    ? lengths[(i + 1) * width + j + 1] + 1
+                    : Math.max(lengths[(i + 1) * width + j], lengths[i * width + j + 1]);
         }
     }
 
@@ -230,7 +230,7 @@ function longestCommonSubsequence(a: string[], b: string[]): [number, number][] 
             pairs.push([i, j]);
             i++;
             j++;
-        } else if (lengths[(i + 1) * width + j]! >= lengths[i * width + j + 1]!) {
+        } else if (lengths[(i + 1) * width + j] >= lengths[i * width + j + 1]) {
             i++;
         } else {
             j++;
@@ -243,7 +243,7 @@ function sameLines(a: string[], b: string[]): boolean {
     return a.length === b.length && a.every((line, index) => line === b[index]);
 }
 
-function splitLines(text: string): string[] {
+export function splitLines(text: string): string[] {
     return text.split(/\r\n|\n|\r/);
 }
 

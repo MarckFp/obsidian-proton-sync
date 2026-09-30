@@ -34,3 +34,37 @@ export async function runPooled<T>(
 
     await Promise.all(workers);
 }
+
+/**
+ * A FIFO gate that lets at most `concurrency` tasks through at once.
+ *
+ * Where {@link runPooled} owns a fixed list of tasks, a limiter is shared by
+ * tasks that only sometimes need the scarce resource: a full sync checks every
+ * file quickly, and only the few that need a transfer queue up here.
+ */
+export class Limiter {
+    private active = 0;
+    private readonly waiting: (() => void)[] = [];
+
+    constructor(private readonly concurrency: number) {}
+
+    async run<T>(task: () => Promise<T>): Promise<T> {
+        if (this.active >= Math.max(1, this.concurrency)) {
+            await new Promise<void>((resolve) => this.waiting.push(resolve));
+        } else {
+            this.active++;
+        }
+        try {
+            return await task();
+        } finally {
+            // Hand the slot straight to the next waiter, so the count never
+            // dips and lets a newcomer jump the queue.
+            const next = this.waiting.shift();
+            if (next) {
+                next();
+            } else {
+                this.active--;
+            }
+        }
+    }
+}

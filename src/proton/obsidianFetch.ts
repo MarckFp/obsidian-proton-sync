@@ -19,7 +19,7 @@ import { requestUrl, type RequestUrlParam } from 'obsidian';
  * more memory here than a streaming client would.
  */
 export async function obsidianFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    const request = new Request(input as RequestInfo, init);
+    const request = new Request(input, init);
 
     const headers: Record<string, string> = {};
     request.headers.forEach((value, key) => {

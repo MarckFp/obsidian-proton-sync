@@ -11,6 +11,12 @@ export type PluginSettings = {
     /** Keeps the losing side as a sibling file under `prefer-*` policies too. */
     keepConflictCopies: boolean;
 
+    /**
+     * Everything held: no passes, no polling, no watching. Changes made in the
+     * meantime are found by the full sync that runs on resume. Persisted, so a
+     * pause survives a restart.
+     */
+    paused: boolean;
     /** Watch the vault and sync changes as they happen. */
     autoSync: boolean;
     /** Run a full reconciliation when the plugin loads. */
@@ -29,8 +35,19 @@ export type PluginSettings = {
     /** Parallel uploads/downloads. Kept low to stay within Drive's limits. */
     transferConcurrency: number;
 
-    /** Skip files larger than this. 0 disables the limit. */
+    /** Skip files larger than this, in either direction. 0 disables the limit. */
     maxFileSizeMb: number;
+    /**
+     * On phones and tablets only: files larger than this are left where they
+     * are, to be synced by a desktop device. 0 disables the limit.
+     */
+    mobileMaxFileSizeMb: number;
+    /**
+     * On phones and tablets only: hold the sync while on a cellular
+     * connection. Only Android reports the connection type; elsewhere this has
+     * no effect.
+     */
+    wifiOnly: boolean;
     /** Glob patterns, matched against vault-relative paths. */
     excludePatterns: string[];
     /** Sync `.obsidian/` — appearance, plugins, hotkeys — alongside the notes. */
@@ -93,6 +110,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     conflictPolicy: 'keep-both',
     keepConflictCopies: true,
 
+    paused: false,
     autoSync: true,
     syncOnStartup: true,
     uploadDebounceMs: 2000,
@@ -100,6 +118,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     transferConcurrency: 3,
 
     maxFileSizeMb: 0,
+    mobileMaxFileSizeMb: 0,
+    wifiOnly: false,
     excludePatterns: [],
     syncObsidianConfig: true,
 

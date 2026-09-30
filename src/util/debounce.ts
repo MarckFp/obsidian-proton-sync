@@ -8,7 +8,7 @@
  */
 export class PathBatcher {
     private pending = new Set<string>();
-    private timer: ReturnType<typeof setTimeout> | null = null;
+    private timer: number | null = null;
     private firstQueuedAt = 0;
 
     constructor(
@@ -47,7 +47,7 @@ export class PathBatcher {
     /** Hand over whatever is pending right now. */
     flush(): void {
         if (this.timer !== null) {
-            clearTimeout(this.timer);
+            window.clearTimeout(this.timer);
             this.timer = null;
         }
         if (this.pending.size === 0) {
@@ -61,7 +61,7 @@ export class PathBatcher {
     /** Drop anything pending without delivering it. */
     cancel(): void {
         if (this.timer !== null) {
-            clearTimeout(this.timer);
+            window.clearTimeout(this.timer);
             this.timer = null;
         }
         this.pending.clear();
@@ -69,11 +69,11 @@ export class PathBatcher {
 
     private schedule(): void {
         if (this.timer !== null) {
-            clearTimeout(this.timer);
+            window.clearTimeout(this.timer);
         }
         const elapsed = Date.now() - this.firstQueuedAt;
         const wait = Math.max(0, Math.min(this.delayMs, this.maxWaitMs - elapsed));
-        this.timer = setTimeout(() => {
+        this.timer = window.setTimeout(() => {
             this.timer = null;
             this.flush();
         }, wait);

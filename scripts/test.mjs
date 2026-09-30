@@ -38,6 +38,14 @@ try {
         logLevel: 'warning',
         // The real module only exists inside the app.
         alias: { obsidian: path.resolve('tests/stubs/obsidian.ts') },
+        // The plugin schedules through `window.setTimeout` for popout-window
+        // compatibility. Node has no `window`; a minimal one forwards to the
+        // globals at call time, so anything that swaps them still sees calls.
+        banner: {
+            js:
+                'globalThis.window ??= { setTimeout: (...a) => setTimeout(...a), ' +
+                'clearTimeout: (t) => clearTimeout(t) };',
+        },
     });
 
     // The compiled files are listed one by one: how `--test` treats a

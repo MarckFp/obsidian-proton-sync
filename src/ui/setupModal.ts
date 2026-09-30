@@ -11,7 +11,7 @@ import { SignInModal } from './signInModal';
  * have to discover three separate settings in the right order before anything
  * happens. Shown once only: closing it, finished or not, marks setup as done,
  * and everything it sets can be changed later in the plugin settings or by
- * running the "Set up Proton Drive Sync" command.
+ * running the "Open setup assistant" command.
  *
  * Nothing syncs until "Start syncing": choosing a folder is the step that
  * decides what the first sync compares against, and the user should get to

@@ -194,7 +194,10 @@ export class VaultIO {
      * that matters and the digest is reused instead of re-reading the bytes.
      * A full vault scan on a large vault is otherwise dominated by hashing.
      */
-    async getState(path: string, knownBase?: SyncBase): Promise<LocalState | undefined> {
+    async getState(
+        path: string,
+        knownBase?: Pick<SyncBase, 'hash' | 'size' | 'localMtime'>,
+    ): Promise<LocalState | undefined> {
         const stat = await this.adapter.stat(path);
         if (!stat || stat.type !== 'file') {
             return undefined;
@@ -439,7 +442,7 @@ export class VaultIO {
      * which Obsidian dispatches asynchronously, is still recognised as ours.
      */
     private releaseSelfWrite(path: string): void {
-        setTimeout(() => {
+        window.setTimeout(() => {
             const count = (this.selfWrites.get(path) ?? 1) - 1;
             if (count <= 0) {
                 this.selfWrites.delete(path);
@@ -459,7 +462,7 @@ export class VaultIO {
     }
 }
 
-async function* readChunks(fullPath: string): AsyncGenerator<Uint8Array> {
+async function* readChunks(fullPath: string): AsyncGenerator<Uint8Array, void> {
     const handle = await nodeModules()!.fs.open(fullPath, 'r');
     try {
         while (true) {

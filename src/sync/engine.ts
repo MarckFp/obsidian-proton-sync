@@ -10,16 +10,33 @@ import type { App } from 'obsidian';
 import { MIN_POLL_SECONDS, type PluginSettings } from '../settings';
 import { PathBatcher } from '../util/debounce';
 import type { Logger } from '../util/logger';
-import { runPooled } from '../util/pool';
+import { Limiter, runPooled } from '../util/pool';
 import { ConflictResolver } from './conflicts';
-import { DriveIO, type NodeLocation, type RemoteTree } from './drive';
+import { DriveIO, type NodeLocation, type RemoteTree, type UploadSource } from './drive';
 import { basename, conflictCopyPath, isWithin, PathFilter, parentPath, replacePrefix, splitExtension } from './paths';
 import { reconcile } from './reconcile';
 import type { SyncState } from './state';
 import type { ConflictPolicy, ConflictReason, LocalState, RemoteState, SyncAction, SyncBase } from './types';
 import { LARGE_FILE_BYTES, VaultIO } from './vault';
 
-export type SyncStatus = 'signed-out' | 'not-configured' | 'idle' | 'syncing' | 'offline' | 'error';
+export type SyncStatus =
+    | 'signed-out'
+    | 'not-configured'
+    | 'idle'
+    | 'syncing'
+    | 'offline'
+    | 'error'
+    | 'paused'
+    /** Held by the "Wi-Fi only" setting while on a cellular connection. */
+    | 'waiting-for-wifi';
+
+/** A transfer big enough to be worth showing progress for. */
+export type TransferProgress = {
+    path: string;
+    direction: 'upload' | 'download';
+    bytes: number;
+    total: number;
+};
 
 export type SyncSummary = {
     status: SyncStatus;
@@ -28,7 +45,35 @@ export type SyncSummary = {
     conflicts: number;
     uploaded: number;
     downloaded: number;
+    /** Files handled so far in the current pass, when it covers more than one. */
+    progress: { done: number; total: number } | null;
+    /** The largest transfer in flight, if any is large enough to report. */
+    transfer: TransferProgress | null;
 };
+
+/** What a first sync would do, worked out without touching either side. */
+export type SyncPlan = {
+    localFiles: number;
+    remoteFiles: number;
+    uploads: string[];
+    downloads: string[];
+    /** On both sides with different content: handled by the conflict policy. */
+    conflicts: string[];
+    /** Removals, which a first sync never makes; listed only if state was not empty. */
+    removals: string[];
+    /** Over a size limit, so left where they are. */
+    held: string[];
+    unchanged: number;
+};
+
+/** What the engine needs to know about the device it runs on. */
+export type EngineEnvironment = {
+    isMobile: boolean;
+    /** Whether the connection is known to be cellular. */
+    isMetered: () => boolean;
+};
+
+const DESKTOP: EngineEnvironment = { isMobile: false, isMetered: () => false };
 
 /** How a conflict ended, for telling the user about it. */
 export type ConflictOutcome = 'kept-both' | 'merged' | 'kept-local' | 'kept-remote' | 'deferred';
@@ -75,6 +120,23 @@ type RemoteView = {
 const MAX_BATCH_WAIT_MS = 15_000;
 
 /**
+ * Files checked at once in a pass. Checking is local work, a stat and at most
+ * a hash, so it runs well above the transfer limit: a full sync of a large
+ * vault is mostly files that turn out unchanged, and they should not queue
+ * behind the few that need an upload.
+ */
+const SCAN_CONCURRENCY = 8;
+
+/** Transfers smaller than this finish too fast for progress to mean anything. */
+const PROGRESS_MIN_BYTES = 1024 * 1024;
+
+/** Progress updates are coalesced to at most one per this interval. */
+const CHANGE_THROTTLE_MS = 250;
+
+/** Transferred first, so a first sync is usable long before the attachments arrive. */
+const NOTE_EXTENSIONS = new Set(['.md', '.canvas', '.base', '.txt']);
+
+/**
  * Drives the sync: watches both sides, decides what each change means through
  * `reconcile`, and carries out the result.
  *
@@ -103,16 +165,29 @@ export class SyncEngine {
     private lastError: string | null = null;
     private uploaded = 0;
     private downloaded = 0;
+    private paused = false;
+    /** A full sync was asked for while the network was held; it runs once it is not. */
+    private deferredFullSync = false;
+    private progress: { done: number; total: number } | null = null;
+    private readonly transfers = new Map<symbol, TransferProgress>();
+    private changeTimer: number | null = null;
+    /** What {@link updateSettings} compares against to spot a change of scope. */
+    private scopeKey: string;
+    /**
+     * Local states worked out by {@link plan}, reused by the first sync that
+     * follows it while the files are unchanged, so nothing is hashed twice.
+     */
+    private readonly plannedLocal = new Map<string, LocalState>();
 
     private queue: Promise<void> = Promise.resolve();
-    private pollTimer: ReturnType<typeof setTimeout> | null = null;
+    private pollTimer: number | null = null;
     /** A poll is queued or running; only one at a time. */
     private polling = false;
     private abortController: AbortController | null = null;
 
     /** Renames seen in the current tick, applied together; see {@link onVaultRename}. */
     private pendingRenames: PendingRename[] = [];
-    private renameTimer: ReturnType<typeof setTimeout> | null = null;
+    private renameTimer: number | null = null;
     /** Policies chosen for single files in the conflicts dialog; see {@link resolveConflict}. */
     private readonly policyOverrides = new Map<string, ConflictPolicy>();
     /** Folders deleted locally, whose Drive counterpart is removed once their files have been. */
@@ -141,9 +216,11 @@ export class SyncEngine {
         private readonly logger: Logger,
         private readonly hooks: EngineHooks,
         private readonly scope: VaultScope,
+        private readonly environment: EngineEnvironment = DESKTOP,
     ) {
         this.vault = new VaultIO(app, logger.getLogger('vault'));
         this.filter = this.createFilter(settings);
+        this.scopeKey = scopeKeyOf(settings);
         this.batcher = new PathBatcher(settings.uploadDebounceMs, MAX_BATCH_WAIT_MS, (paths) => {
             void this.enqueue(() => this.processPaths(new Set(paths)));
         });
@@ -157,21 +234,29 @@ export class SyncEngine {
             conflicts: this.state.conflicts().length,
             uploaded: this.uploaded,
             downloaded: this.downloaded,
+            progress: this.progress ? { ...this.progress } : null,
+            transfer: this.largestTransfer(),
         };
+    }
+
+    isPaused(): boolean {
+        return this.paused;
     }
 
     /** Apply changed settings without a restart, resyncing if the scope changed. */
     updateSettings(settings: PluginSettings): void {
-        const scopeChanged =
-            settings.syncObsidianConfig !== this.settings.syncObsidianConfig ||
-            settings.excludePatterns.join(' ') !== this.settings.excludePatterns.join(' ');
+        // Compared against a snapshot, not the previous object: the plugin
+        // mutates one settings object in place and hands the same one back.
+        const scopeKey = scopeKeyOf(settings);
+        const scopeChanged = scopeKey !== this.scopeKey;
+        this.scopeKey = scopeKey;
 
         this.settings = settings;
         this.filter = this.createFilter(settings);
         this.batcher.setDelay(settings.uploadDebounceMs);
         this.resolver = this.drive ? this.createResolver(this.drive, settings.conflictPolicy) : null;
 
-        if (this.running && scopeChanged) {
+        if (this.running && scopeChanged && !this.paused) {
             void this.syncNow();
         }
     }
@@ -181,8 +266,15 @@ export class SyncEngine {
         this.resolver = this.createResolver(this.drive, this.settings.conflictPolicy);
         this.rootUid = rootUid;
         this.running = true;
+        this.paused = this.settings.paused;
         this.abortController = new AbortController();
 
+        if (this.paused) {
+            // Nothing runs until resume, which starts with a full sync and so
+            // needs nothing primed here.
+            this.setStatus('paused');
+            return;
+        }
         if (this.settings.syncOnStartup) {
             await this.syncNow();
         } else {
@@ -198,20 +290,67 @@ export class SyncEngine {
         this.running = false;
         this.batcher.cancel();
         if (this.pollTimer !== null) {
-            clearTimeout(this.pollTimer);
+            window.clearTimeout(this.pollTimer);
             this.pollTimer = null;
         }
         if (this.renameTimer !== null) {
-            clearTimeout(this.renameTimer);
+            window.clearTimeout(this.renameTimer);
             this.renameTimer = null;
+        }
+        if (this.changeTimer !== null) {
+            window.clearTimeout(this.changeTimer);
+            this.changeTimer = null;
         }
         this.pendingRenames = [];
         this.pendingFolderDeletes.clear();
         this.retryPaths.clear();
+        this.plannedLocal.clear();
+        this.deferredFullSync = false;
         this.abortController?.abort();
         this.abortController = null;
         await this.queue.catch(() => undefined);
         await this.state.flush();
+    }
+
+    /**
+     * Hold everything: no watching, no polling. A pass already running is
+     * left to finish, since stopping a transfer halfway gains nothing.
+     *
+     * Edits made while paused are not tracked one by one; the full sync that
+     * {@link resume} starts with finds them all, the same way a sync after a
+     * restart does.
+     */
+    pause(): void {
+        if (this.paused) {
+            return;
+        }
+        this.paused = true;
+        this.batcher.cancel();
+        this.pendingRenames = [];
+        for (const timer of [this.pollTimer, this.renameTimer]) {
+            if (timer !== null) {
+                window.clearTimeout(timer);
+            }
+        }
+        this.pollTimer = null;
+        this.renameTimer = null;
+        this.logger.info('Sync paused');
+        this.setStatus(this.status === 'syncing' ? 'syncing' : 'paused');
+    }
+
+    /** Pick up where {@link pause} left off, with a full sync to catch up. */
+    async resume(): Promise<void> {
+        if (!this.paused) {
+            return;
+        }
+        this.paused = false;
+        this.logger.info('Sync resumed');
+        if (!this.running) {
+            return;
+        }
+        this.setStatus('idle');
+        await this.syncNow();
+        this.scheduleRemotePoll();
     }
 
     /** Queue a full reconciliation of both sides. */
@@ -248,8 +387,13 @@ export class SyncEngine {
 
     // -- vault events ----------------------------------------------------
 
+    /** Whether local and remote changes are being followed right now. */
+    private get watching(): boolean {
+        return this.running && this.settings.autoSync && !this.paused;
+    }
+
     onVaultChange(path: string): void {
-        if (!this.running || !this.settings.autoSync) {
+        if (!this.watching) {
             return;
         }
         if (this.vault.isSelfWrite(path) || this.filter.isExcludedWithAncestors(path)) {
@@ -259,7 +403,7 @@ export class SyncEngine {
     }
 
     onVaultFolderDelete(path: string): void {
-        if (!this.running || !this.settings.autoSync) {
+        if (!this.watching) {
             return;
         }
         if (this.vault.isSelfWrite(path) || this.filter.isExcludedWithAncestors(path)) {
@@ -286,7 +430,7 @@ export class SyncEngine {
      * Obsidian reports them in.
      */
     onVaultRename(oldPath: string, newPath: string, isFolder: boolean): void {
-        if (!this.running || !this.settings.autoSync) {
+        if (!this.watching) {
             return;
         }
         if (this.vault.isSelfWrite(oldPath) || this.vault.isSelfWrite(newPath)) {
@@ -317,7 +461,7 @@ export class SyncEngine {
         this.batcher.rename(oldPath, newPath);
         this.pendingRenames.push({ from: oldPath, to: newPath, isFolder });
         if (this.renameTimer === null) {
-            this.renameTimer = setTimeout(() => {
+            this.renameTimer = window.setTimeout(() => {
                 this.renameTimer = null;
                 const renames = this.pendingRenames.splice(0);
                 void this.enqueue(() => this.applyLocalRenames(renames));
@@ -334,6 +478,12 @@ export class SyncEngine {
             this.setStatus('not-configured');
             return;
         }
+        if (this.networkHeld()) {
+            this.deferredFullSync = true;
+            this.setStatus('waiting-for-wifi');
+            return;
+        }
+        this.deferredFullSync = false;
 
         this.setStatus('syncing');
         try {
@@ -393,6 +543,7 @@ export class SyncEngine {
             this.caseCollisions = this.findCaseCollisions(paths);
             await this.reconcileAll(paths, tree.files, skip);
             await this.cleanUpDeletedFolders(goneFolders, locallyDeletedFolders);
+            this.plannedLocal.clear();
 
             this.lastSyncedAt = Date.now();
             this.lastError = null;
@@ -413,6 +564,13 @@ export class SyncEngine {
      */
     private async processPaths(paths: Set<string>, confirmedAbsent: Set<string> = new Set()): Promise<void> {
         if (!this.drive || !this.rootUid || !this.running) {
+            return;
+        }
+        if (this.networkHeld()) {
+            for (const path of paths) {
+                this.retryPaths.add(path);
+            }
+            this.setStatus('waiting-for-wifi');
             return;
         }
 
@@ -443,50 +601,117 @@ export class SyncEngine {
         }
     }
 
+    /**
+     * Decide and carry out every path, returning the ones that failed.
+     *
+     * Deciding is cheap and runs {@link SCAN_CONCURRENCY} wide; only the
+     * paths that need Drive queue for one of the user's transfer slots, notes
+     * first. A file that changes while it waits is decided again, so the
+     * wait never turns into acting on a stale decision.
+     */
     private async reconcileAll(
         paths: Set<string>,
         remoteStates: Map<string, RemoteState | undefined>,
         skip: Set<string> = new Set(),
     ): Promise<string[]> {
-        const ordered = [...paths].filter((path) => !skip.has(path) && !this.caseCollisions.has(path));
+        const ordered = [...paths]
+            .filter((path) => !skip.has(path) && !this.caseCollisions.has(path))
+            .sort(this.transferOrder(remoteStates));
         for (const path of skip) {
             this.logger.debug(`Leaving "${path}" alone: could not confirm its state on Drive`);
         }
 
+        const transfers = new Limiter(this.settings.transferConcurrency);
+        const limit = this.sizeLimitBytes();
+        this.progress = ordered.length > 1 ? { done: 0, total: ordered.length } : null;
+
         const work = ordered.map((path) => async () => {
-            if (this.state.isConflicted(path) && this.settings.conflictPolicy === 'manual') {
-                // Left for the user; acting now would undo a pending decision.
-                return;
+            try {
+                if (this.state.isConflicted(path) && this.settings.conflictPolicy === 'manual') {
+                    // Left for the user; acting now would undo a pending decision.
+                    return;
+                }
+                let decision = await this.decide(path, remoteStates.get(path), limit);
+                if (!decision) {
+                    return;
+                }
+                if (!needsTransfer(decision.action)) {
+                    await this.applyAction(path, decision.action, decision.local, decision.remote);
+                    return;
+                }
+                await transfers.run(async () => {
+                    if (decision && (await this.localMoved(path, decision.local))) {
+                        decision = await this.decide(path, remoteStates.get(path), limit);
+                    }
+                    if (decision) {
+                        await this.applyAction(path, decision.action, decision.local, decision.remote);
+                    }
+                });
+            } finally {
+                if (this.progress) {
+                    this.progress.done++;
+                    this.emitChange();
+                }
             }
-
-            const record = this.state.get(path);
-
-            const local = await this.vault.getState(path, record?.base);
-            if (local && this.exceedsSizeLimit(local)) {
-                this.logger.info(
-                    `Skipping "${path}": ${Math.round(local.size / 1024 / 1024)} MB exceeds the configured limit`,
-                );
-                return;
-            }
-
-            const remote = remoteStates.get(path);
-            const action = reconcile({
-                path,
-                ...(record?.base !== undefined && { base: record.base }),
-                ...(local !== undefined && { local }),
-                ...(remote !== undefined && { remote }),
-            });
-
-            await this.applyAction(path, action, local, remote);
         });
 
         const failed: string[] = [];
-        await runPooled(work, this.settings.transferConcurrency, (error, index) => {
-            this.logger.error(`Failed to sync "${ordered[index]}"`, error);
-            this.lastError = errorMessage(error);
-            failed.push(ordered[index]!);
-        });
+        try {
+            await runPooled(work, SCAN_CONCURRENCY, (error, index) => {
+                this.logger.error(`Failed to sync "${ordered[index]}"`, error);
+                this.lastError = errorMessage(error);
+                failed.push(ordered[index]);
+            });
+        } finally {
+            this.progress = null;
+        }
         return failed;
+    }
+
+    /** What to do with one path, or null when it is to be left alone this pass. */
+    private async decide(
+        path: string,
+        remote: RemoteState | undefined,
+        limit: number,
+    ): Promise<{ action: SyncAction; local: LocalState | undefined; remote: RemoteState | undefined } | null> {
+        const record = this.state.get(path);
+        const planned = this.plannedLocal.get(path);
+        const known = record?.base ?? (planned && { hash: planned.hash, size: planned.size, localMtime: planned.mtime });
+
+        const local = await this.vault.getState(path, known);
+        if (local && local.size > limit) {
+            this.logger.info(`Skipping "${path}": ${megabytes(local.size)} MB exceeds the configured limit`);
+            return null;
+        }
+
+        const action = reconcile({
+            path,
+            ...(record?.base !== undefined && { base: record.base }),
+            ...(local !== undefined && { local }),
+            ...(remote !== undefined && { remote }),
+        });
+        if (remote?.size !== undefined && remote.size > limit && (action.type === 'download' || action.type === 'conflict')) {
+            this.logger.info(`Leaving "${path}" on Drive: ${megabytes(remote.size)} MB exceeds this device's limit`);
+            return null;
+        }
+        return { action, local, remote };
+    }
+
+    /** Whether the file is no longer what `local` described: edited, created or removed since. */
+    private async localMoved(path: string, local: LocalState | undefined): Promise<boolean> {
+        const stat = await this.vault.stat(path);
+        if (!local || !stat) {
+            return (local === undefined) !== (stat === undefined);
+        }
+        return stat.size !== local.size || stat.mtime !== local.mtime;
+    }
+
+    /** Notes before everything else, then smaller before larger where the size is known. */
+    private transferOrder(remoteStates: Map<string, RemoteState | undefined>): (a: string, b: string) => number {
+        const rank = (path: string) => (NOTE_EXTENSIONS.has(splitExtension(path).extension.toLowerCase()) ? 0 : 1);
+        const size = (path: string) =>
+            remoteStates.get(path)?.size ?? this.state.get(path)?.base?.size ?? Number.MAX_SAFE_INTEGER;
+        return (a, b) => rank(a) - rank(b) || size(a) - size(b);
     }
 
     // -- carrying out a decision -----------------------------------------
@@ -545,8 +770,23 @@ export class SyncEngine {
      * which is not necessarily what the reconcile saw a moment earlier.
      */
     private async upload(path: string, remote: RemoteState | undefined): Promise<void> {
-        const drive = this.drive!;
         const { source, local } = await this.vault.openUpload(path);
+        const progress = this.trackTransfer(path, 'upload', source.size);
+        try {
+            await this.sendUpload(path, remote, source, local, progress.onProgress);
+        } finally {
+            progress.end();
+        }
+    }
+
+    private async sendUpload(
+        path: string,
+        remote: RemoteState | undefined,
+        source: UploadSource,
+        local: LocalState,
+        onProgress: ((bytes: number) => void) | undefined,
+    ): Promise<void> {
+        const drive = this.drive!;
         const signal = this.abortController?.signal;
 
         const record = this.state.get(path);
@@ -554,7 +794,7 @@ export class SyncEngine {
         if (nodeUid) {
             const previousRevision = remote?.revisionUid ?? record?.base?.remoteRevisionUid;
             const previousHash = record?.base?.hash;
-            const result = await drive.uploadRevision(nodeUid, source, signal);
+            const result = await drive.uploadRevision(nodeUid, source, signal, onProgress);
             this.uploaded++;
             this.state.setSynced(path, result.nodeUid, 'file', baseOf(local, result.revisionUid));
             this.logger.debug(`Uploaded "${path}"`);
@@ -570,7 +810,7 @@ export class SyncEngine {
         const parentUid = await this.ensureRemoteFolder(parentPath(path));
         let result: { nodeUid: string; revisionUid: string };
         try {
-            result = await drive.uploadNewFile(parentUid, basename(path), source, signal);
+            result = await drive.uploadNewFile(parentUid, basename(path), source, signal, onProgress);
         } catch (error) {
             // Another device created a file under the same name since this
             // pass looked. That is the both-created conflict, found late.
@@ -671,26 +911,31 @@ export class SyncEngine {
     ): Promise<LocalState> {
         const drive = this.drive!;
         const signal = this.abortController?.signal;
+        const { onProgress, end } = this.trackTransfer(path, 'download', size);
 
-        if (size === undefined || size > LARGE_FILE_BYTES) {
-            const file = await this.vault.openDownload(path);
-            if (file) {
-                try {
-                    await ('nodeUid' in what
-                        ? drive.downloadTo(what.nodeUid, file.sink, signal)
-                        : drive.downloadRevisionTo(what.revisionUid, file.sink, signal));
-                    return await file.commit(mtime);
-                } catch (error) {
-                    await file.abort();
-                    throw error;
+        try {
+            if (size === undefined || size > LARGE_FILE_BYTES) {
+                const file = await this.vault.openDownload(path);
+                if (file) {
+                    try {
+                        await ('nodeUid' in what
+                            ? drive.downloadTo(what.nodeUid, file.sink, signal, onProgress)
+                            : drive.downloadRevisionTo(what.revisionUid, file.sink, signal, onProgress));
+                        return await file.commit(mtime);
+                    } catch (error) {
+                        await file.abort();
+                        throw error;
+                    }
                 }
             }
-        }
 
-        const data = await ('nodeUid' in what
-            ? drive.downloadFile(what.nodeUid, signal)
-            : drive.downloadRevision(what.revisionUid, signal));
-        return this.vault.writeBinary(path, data, mtime);
+            const data = await ('nodeUid' in what
+                ? drive.downloadFile(what.nodeUid, signal, onProgress)
+                : drive.downloadRevision(what.revisionUid, signal, onProgress));
+            return await this.vault.writeBinary(path, data, mtime);
+        } finally {
+            end();
+        }
     }
 
     private async handleConflict(
@@ -817,6 +1062,13 @@ export class SyncEngine {
 
     private async applyLocalRenames(renames: PendingRename[]): Promise<void> {
         if (!this.drive || !this.rootUid || !this.running) {
+            return;
+        }
+        if (this.networkHeld()) {
+            // Too many paths to carry over one by one; a full sync on Wi-Fi
+            // sees the result of every rename.
+            this.deferredFullSync = true;
+            this.setStatus('waiting-for-wifi');
             return;
         }
 
@@ -1468,7 +1720,7 @@ export class SyncEngine {
      * what makes a note edited elsewhere show up on opening the app.
      */
     pollNow(): void {
-        if (!this.running || this.polling) {
+        if (!this.running || this.polling || this.paused) {
             return;
         }
         this.runPoll();
@@ -1484,14 +1736,14 @@ export class SyncEngine {
     }
 
     private scheduleRemotePoll(): void {
-        if (!this.running) {
+        if (!this.running || this.paused) {
             return;
         }
         if (this.pollTimer !== null) {
-            clearTimeout(this.pollTimer);
+            window.clearTimeout(this.pollTimer);
         }
         const seconds = Math.max(MIN_POLL_SECONDS, this.settings.remotePollSeconds);
-        this.pollTimer = setTimeout(() => {
+        this.pollTimer = window.setTimeout(() => {
             this.pollTimer = null;
             this.runPoll();
         }, seconds * 1000);
@@ -1499,11 +1751,15 @@ export class SyncEngine {
 
     private runPoll(): void {
         if (this.pollTimer !== null) {
-            clearTimeout(this.pollTimer);
+            window.clearTimeout(this.pollTimer);
             this.pollTimer = null;
         }
         this.polling = true;
         void this.enqueue(async () => {
+            if (this.deferredFullSync) {
+                await this.fullSync();
+                return;
+            }
             await this.pollRemoteEvents();
             await this.pollConfigFolder();
         }).finally(() => {
@@ -1524,6 +1780,14 @@ export class SyncEngine {
         const scopeId = this.treeEventScopeId;
         if (!drive || !scopeId || !this.running || !this.settings.autoSync) {
             return;
+        }
+        if (this.networkHeld()) {
+            // The cursor stays put, so these events are read once allowed.
+            this.setStatus('waiting-for-wifi');
+            return;
+        }
+        if (this.status === 'waiting-for-wifi') {
+            this.setStatus('idle');
         }
 
         const cursor = this.state.getEventCursor(scopeId);
@@ -1796,8 +2060,64 @@ export class SyncEngine {
         return this.createResolver(this.drive!, reason === 'both-created' ? 'prefer-remote' : 'prefer-newest', false);
     }
 
-    private exceedsSizeLimit(local: LocalState): boolean {
-        return this.settings.maxFileSizeMb > 0 && local.size > this.settings.maxFileSizeMb * 1024 * 1024;
+    /** The smallest size limit in force on this device, in bytes; Infinity for none. */
+    private sizeLimitBytes(): number {
+        const limits = [this.settings.maxFileSizeMb];
+        if (this.environment.isMobile) {
+            limits.push(this.settings.mobileMaxFileSizeMb);
+        }
+        const active = limits.filter((mb) => mb > 0);
+        return active.length === 0 ? Infinity : Math.min(...active) * 1024 * 1024;
+    }
+
+    /** Whether the "Wi-Fi only" setting is holding the sync right now. */
+    private networkHeld(): boolean {
+        return this.settings.wifiOnly && this.environment.isMobile && this.environment.isMetered();
+    }
+
+    /** Report progress for a transfer of `total` bytes, if it is large enough to be worth it. */
+    private trackTransfer(
+        path: string,
+        direction: TransferProgress['direction'],
+        total: number | undefined,
+    ): { onProgress: ((bytes: number) => void) | undefined; end: () => void } {
+        if (total === undefined || total < PROGRESS_MIN_BYTES) {
+            return { onProgress: undefined, end: () => undefined };
+        }
+        const key = Symbol(path);
+        const entry: TransferProgress = { path, direction, bytes: 0, total };
+        this.transfers.set(key, entry);
+        return {
+            onProgress: (bytes) => {
+                entry.bytes = Math.min(bytes, total);
+                this.emitChange();
+            },
+            end: () => {
+                this.transfers.delete(key);
+                this.emitChange();
+            },
+        };
+    }
+
+    private largestTransfer(): TransferProgress | null {
+        let largest: TransferProgress | null = null;
+        for (const transfer of this.transfers.values()) {
+            if (!largest || transfer.total > largest.total) {
+                largest = transfer;
+            }
+        }
+        return largest ? { ...largest } : null;
+    }
+
+    /** Tell the UI about progress, at most once per {@link CHANGE_THROTTLE_MS}. */
+    private emitChange(): void {
+        if (this.changeTimer !== null) {
+            return;
+        }
+        this.changeTimer = window.setTimeout(() => {
+            this.changeTimer = null;
+            this.hooks.onChange(this.getSummary());
+        }, CHANGE_THROTTLE_MS);
     }
 
     /** Serialises passes so two of them cannot interleave on the same path. */
@@ -1813,9 +2133,127 @@ export class SyncEngine {
     }
 
     private setStatus(status: SyncStatus): void {
-        this.status = status;
+        this.status = status === 'idle' && this.paused ? 'paused' : status;
         this.hooks.onChange(this.getSummary());
     }
+
+    // -- read-only views for the UI ----------------------------------------
+
+    /**
+     * What a first sync against `rootUid` would do, without doing any of it.
+     *
+     * Shown before the first sync of a vault with a folder that already holds
+     * files, which is the one moment where the user cannot yet know what the
+     * plugin is about to change. The local states worked out here are kept for
+     * the sync that follows, so it does not hash every file a second time.
+     */
+    async plan(client: ProtonDriveClient, rootUid: string): Promise<SyncPlan> {
+        const drive = new DriveIO(client, this.logger.getLogger('drive'));
+        const included = (path: string) => !this.filter.isExcludedWithAncestors(path);
+        const [tree, local] = await Promise.all([
+            drive.listTree(rootUid, (path) => !this.filter.isExcluded(path)),
+            this.vault.list((path) => !this.filter.isExcluded(path)),
+        ]);
+
+        const localFiles = local.files.filter(included);
+        const remoteFiles = [...tree.files.keys()].filter(included);
+        const plan: SyncPlan = {
+            localFiles: localFiles.length,
+            remoteFiles: remoteFiles.length,
+            uploads: [],
+            downloads: [],
+            conflicts: [],
+            removals: [],
+            held: [],
+            unchanged: 0,
+        };
+
+        const limit = this.sizeLimitBytes();
+        const paths = [...new Set([...localFiles, ...remoteFiles])];
+        this.plannedLocal.clear();
+        await runPooled(
+            paths.map((path) => async () => {
+                const record = this.state.get(path);
+                const localState = await this.vault.getState(path, record?.base);
+                if (localState) {
+                    this.plannedLocal.set(path, localState);
+                }
+                const remote = tree.files.get(path);
+                if ((localState?.size ?? 0) > limit || (remote?.size ?? 0) > limit) {
+                    plan.held.push(path);
+                    return;
+                }
+                const action = reconcile({
+                    path,
+                    ...(record?.base !== undefined && { base: record.base }),
+                    ...(localState !== undefined && { local: localState }),
+                    ...(remote !== undefined && { remote }),
+                });
+                switch (action.type) {
+                    case 'upload':
+                        plan.uploads.push(path);
+                        break;
+                    case 'download':
+                        plan.downloads.push(path);
+                        break;
+                    case 'conflict':
+                        plan.conflicts.push(path);
+                        break;
+                    case 'delete-local':
+                    case 'delete-remote':
+                        plan.removals.push(path);
+                        break;
+                    default:
+                        plan.unchanged++;
+                }
+            }),
+            SCAN_CONCURRENCY,
+            (error, index) => this.logger.warn(`Could not check "${paths[index]}"`, error),
+        );
+
+        for (const list of [plan.uploads, plan.downloads, plan.conflicts, plan.removals, plan.held]) {
+            list.sort((a, b) => a.localeCompare(b));
+        }
+        return plan;
+    }
+
+    /**
+     * The Drive version of a file, for comparing it with the local one. Null
+     * when there is no such file on Drive.
+     */
+    async readRemoteVersion(path: string, maxBytes: number): Promise<ArrayBuffer | null> {
+        const drive = this.drive;
+        if (!drive) {
+            throw new Error('Not connected to Proton Drive');
+        }
+        const record = this.state.get(path);
+        let remote: RemoteState | undefined;
+        if (record?.type === 'file') {
+            const node = await drive.getNode(record.nodeUid);
+            remote = node.trashTime === undefined ? drive.toRemoteState(node) : undefined;
+        }
+        remote ??= await this.findByName(path, new Map());
+        if (!remote) {
+            return null;
+        }
+        if (remote.size !== undefined && remote.size > maxBytes) {
+            throw new Error(`The Drive version is too large to compare (${megabytes(remote.size)} MB)`);
+        }
+        return drive.downloadFile(remote.nodeUid);
+    }
+}
+
+/** The settings that decide which paths take part; a change means a full sync. */
+function scopeKeyOf(settings: PluginSettings): string {
+    return JSON.stringify([settings.syncObsidianConfig, settings.excludePatterns]);
+}
+
+function needsTransfer(action: SyncAction): boolean {
+    return action.type !== 'noop' && action.type !== 'forget' && action.type !== 'adopt';
+}
+
+function megabytes(bytes: number): number {
+    return Math.round(bytes / 1024 / 1024);
 }
 
 function baseOf(local: LocalState, remoteRevisionUid: string): SyncBase {

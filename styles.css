@@ -59,3 +59,131 @@
 .proton-drive-sync-notice-list a {
     word-break: break-all;
 }
+
+/* Shared */
+
+.proton-drive-sync-muted {
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
+
+/* First-sync preview */
+
+.proton-drive-sync-plan {
+    padding-inline-start: var(--size-4-4);
+}
+
+.proton-drive-sync-plan summary {
+    cursor: pointer;
+}
+
+.proton-drive-sync-plan-files {
+    max-height: 12em;
+    overflow: auto;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+}
+
+/* Diff */
+
+.proton-drive-sync-diff-modal {
+    width: min(90vw, 960px);
+}
+
+.proton-drive-sync-diff-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--size-4-3);
+    margin-bottom: var(--size-4-2);
+    font-size: var(--font-ui-small);
+}
+
+.proton-drive-sync-diff-stats {
+    margin-inline-start: auto;
+    font-family: var(--font-monospace);
+}
+
+.proton-drive-sync-diff-header .mod-added,
+.proton-drive-sync-diff-legend.mod-added {
+    color: var(--color-green);
+}
+
+.proton-drive-sync-diff-header .mod-removed,
+.proton-drive-sync-diff-legend.mod-removed {
+    color: var(--color-red);
+}
+
+.proton-drive-sync-diff {
+    max-height: 60vh;
+    overflow: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-smaller);
+    line-height: 1.5;
+}
+
+.proton-drive-sync-diff-line {
+    display: grid;
+    grid-template-columns: 3.5em 3.5em 1.5em 1fr;
+}
+
+.proton-drive-sync-diff-line.mod-added {
+    background-color: rgba(var(--color-green-rgb), 0.12);
+}
+
+.proton-drive-sync-diff-line.mod-removed {
+    background-color: rgba(var(--color-red-rgb), 0.12);
+}
+
+.proton-drive-sync-diff-no {
+    padding-inline-end: var(--size-4-2);
+    color: var(--text-faint);
+    text-align: end;
+    user-select: none;
+}
+
+.proton-drive-sync-diff-sign {
+    user-select: none;
+}
+
+.proton-drive-sync-diff-line.mod-added .proton-drive-sync-diff-sign {
+    color: var(--color-green);
+}
+
+.proton-drive-sync-diff-line.mod-removed .proton-drive-sync-diff-sign {
+    color: var(--color-red);
+}
+
+.proton-drive-sync-diff-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    padding-inline-end: var(--size-4-2);
+}
+
+.proton-drive-sync-diff-line.mod-added .proton-drive-sync-diff-change {
+    background-color: rgba(var(--color-green-rgb), 0.35);
+    border-radius: 2px;
+}
+
+.proton-drive-sync-diff-line.mod-removed .proton-drive-sync-diff-change {
+    background-color: rgba(var(--color-red-rgb), 0.35);
+    border-radius: 2px;
+}
+
+.proton-drive-sync-diff-hunk {
+    padding: 0 var(--size-4-2);
+    background-color: var(--background-secondary);
+    color: var(--text-muted);
+}
+
+.proton-drive-sync-diff-fold {
+    display: block;
+    width: 100%;
+    border-radius: 0;
+    box-shadow: none;
+    background-color: var(--background-secondary-alt);
+    color: var(--text-accent);
+    font-size: var(--font-ui-smaller);
+}

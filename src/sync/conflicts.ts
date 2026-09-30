@@ -1,6 +1,6 @@
 import type { Logger } from '../util/logger';
 import type { DriveIO } from './drive';
-import { mediaTypeOf } from './media';
+import { isTextPath } from './media';
 import { mergeThreeWay } from './merge';
 import { conflictCopyPath } from './paths';
 import type { ConflictPolicy, ConflictReason, LocalState, RemoteState, SyncBase } from './types';
@@ -169,7 +169,7 @@ export class ConflictResolver {
         }
 
         this.logger.info(`Merged concurrent edits to "${path}"`);
-        return { action: 'take-merged', content: new TextEncoder().encode(result.text).buffer as ArrayBuffer };
+        return { action: 'take-merged', content: new TextEncoder().encode(result.text).buffer };
     }
 
     /**
@@ -188,17 +188,14 @@ export class ConflictResolver {
 }
 
 /** Above this, a merge is declined before anything is downloaded. */
-const MAX_MERGE_BYTES = 4 * 1024 * 1024;
+export const MAX_MERGE_BYTES = 4 * 1024 * 1024;
 
 /**
  * Only text is worth fetching two revisions of to attempt a merge. An image or
  * a video would be downloaded twice, decoded as text, and declined anyway.
  */
 function isMergeable(path: string, local: LocalState | undefined, remote: RemoteState): boolean {
-    const mediaType = mediaTypeOf(path);
-    const isText =
-        mediaType.startsWith('text/') || mediaType === 'application/json' || mediaType === 'application/xml';
-    return isText && (local?.size ?? 0) <= MAX_MERGE_BYTES && (remote.size ?? 0) <= MAX_MERGE_BYTES;
+    return isTextPath(path) && (local?.size ?? 0) <= MAX_MERGE_BYTES && (remote.size ?? 0) <= MAX_MERGE_BYTES;
 }
 
 function decodeUtf8(data: ArrayBuffer): string {

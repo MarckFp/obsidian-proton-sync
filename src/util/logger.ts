@@ -71,15 +71,23 @@ export class Logger {
             target.buffer.splice(0, target.buffer.length - Logger.BUFFER_SIZE);
         }
 
+        // Info and debug go to `console.debug`, which devtools hides unless
+        // "Verbose" is on, so routine sync chatter stays out of the console
+        // while remaining a click away. The settings tab shows the same entries.
         const prefix = `[${this.scope}]`;
         if (level === 'error') {
             console.error(prefix, message, ...args);
         } else if (level === 'warn') {
             console.warn(prefix, message, ...args);
-        } else if (level === 'debug') {
-            console.debug(prefix, message, ...args);
         } else {
-            console.log(prefix, message, ...args);
+            console.debug(prefix, message, ...args);
         }
     }
+}
+
+/** Entries as plain text, one per line, oldest first, for copying out of the app. */
+export function formatLogEntries(entries: readonly LogEntry[]): string {
+    return entries
+        .map((entry) => `${new Date(entry.time).toISOString()} ${entry.level.toUpperCase().padEnd(5)} [${entry.scope}] ${entry.message}`)
+        .join('\n');
 }

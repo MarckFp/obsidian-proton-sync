@@ -14,6 +14,7 @@
 type Uint8ArrayBase64Alphabet = 'base64' | 'base64url';
 type Uint8ArrayLastChunkHandling = 'loose' | 'strict' | 'stop-before-partial';
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- must match lib.es5's type parameter exactly, or TypeScript refuses to merge the two interfaces
 interface Uint8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> {
     toBase64(options?: { alphabet?: Uint8ArrayBase64Alphabet; omitPadding?: boolean }): string;
     toHex(): string;

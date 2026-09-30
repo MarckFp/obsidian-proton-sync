@@ -1,6 +1,7 @@
 import { type App, Notice } from 'obsidian';
 
 import type { ConflictEvent } from '../sync/engine';
+import { isTextPath } from '../sync/media';
 import { basename } from '../sync/paths';
 import type { ConflictReason } from '../sync/types';
 
@@ -37,7 +38,13 @@ function outcomeText(event: ConflictEvent): string {
  * second version of a note drifting on its own. The notice stays until it is
  * dismissed, and each file in it opens on click.
  */
-export function showConflictNotice(app: App, events: ConflictEvent[], reviewConflicts: () => void): void {
+export type ConflictNoticeActions = {
+    reviewConflicts: () => void;
+    /** Compare a note with the conflict copy written beside it. */
+    compare: (path: string, copyPath: string) => void;
+};
+
+export function showConflictNotice(app: App, events: ConflictEvent[], actions: ConflictNoticeActions): void {
     if (events.length === 0) {
         return;
     }
@@ -65,6 +72,15 @@ export function showConflictNotice(app: App, events: ConflictEvent[], reviewConf
                 item.createSpan({ text: event.path });
             }
             item.appendText(`: ${REASON_TEXT[event.reason]}; ${outcomeText(event)}.`);
+            const { copyPath } = event;
+            if (copyPath && isTextPath(event.path) && app.vault.getFileByPath(copyPath)) {
+                item.appendText(' ');
+                const compare = item.createEl('a', { text: 'Compare', href: '#' });
+                compare.addEventListener('click', (click) => {
+                    click.preventDefault();
+                    actions.compare(event.path, copyPath);
+                });
+            }
         }
         if (events.length > MAX_LISTED) {
             root.createDiv({
@@ -74,7 +90,7 @@ export function showConflictNotice(app: App, events: ConflictEvent[], reviewConf
 
         if (events.some((event) => event.outcome === 'deferred')) {
             const button = root.createEl('button', { text: 'Review conflicts', cls: 'mod-cta' });
-            button.addEventListener('click', () => reviewConflicts());
+            button.addEventListener('click', () => actions.reviewConflicts());
         }
     });
 

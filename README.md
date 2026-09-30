@@ -31,6 +31,19 @@ same implementation Proton's own clients use.
   made to different parts of a note.
 - **Conflict notifications.** When a file changed in two places, a notice names
   it and says how it was settled. Click the file name to open it.
+- **Side-by-side comparison of conflicts.** See exactly what differs between two
+  versions of a note, as a code review would show it: lines only in one version
+  in red with `-`, lines only in the other in green with `+`, and the changed
+  words highlighted. Then pick which version to keep from the same window.
+- **A preview before the first sync.** When a vault with files meets a Drive
+  folder with files, you see what will be uploaded, downloaded and treated as a
+  conflict before anything moves, and can hold off.
+- **Pause and resume**, from the status bar, the command palette or settings.
+- **A status bar that says what is happening**: files checked in the current
+  pass, the progress of a large upload or download, and how long ago the last
+  sync finished.
+- **Mobile-friendly options**: sync on Wi-Fi only (Android), and leave large
+  files for a computer to sync.
 - **Event-based updates.** Changes from other devices arrive through Drive's
   event feed rather than by re-walking the tree.
 
@@ -61,7 +74,11 @@ sign-in and encryption use only web APIs. Differences on mobile:
 
 - Large attachments are held in memory while they transfer, because streaming
   to disk needs Node, which mobile does not have. A multi-gigabyte video can
-  exhaust a phone's memory; set **Skip files larger than** on mobile devices.
+  exhaust a phone's memory; set **Leave large files for other devices** under
+  **On phones and tablets** in settings. It applies to phones and tablets only,
+  so one vault can have the same setting everywhere.
+- **Sync on Wi-Fi only** holds the sync while on mobile data. Only Android tells
+  apps which kind of connection they are on, so on iOS it has no effect.
 - The OS suspends Obsidian in the background, so nothing syncs while the app is
   closed. Pending edits are pushed when you leave the app, and Drive is checked
   as soon as you come back.
@@ -100,7 +117,7 @@ building into that vault's plugin folder.
 ## Setting it up
 
 The first time the plugin loads, a setup window walks you through it. It only
-appears once. To see it again, run **Set up Proton Drive Sync** from the command
+appears once. To see it again, run **Open setup assistant** from the command
 palette. Everything it sets is also in **Settings → Proton Drive Sync**.
 
 1. **Sign in.** A Proton page opens in your browser and you approve the device
@@ -110,6 +127,13 @@ palette. Everything it sets is also in **Settings → Proton Drive Sync**.
    it is treated as part of the vault.
 3. **Choose whether to sync Obsidian settings** (on by default), then **Start
    syncing**. Nothing is transferred before that.
+
+If both the vault and the Drive folder already hold files, the first sync shows
+a preview first: how many files will be downloaded, uploaded, or are on both
+sides with different content, with the file names one click away. **Start
+syncing** goes ahead; **Not now** pauses syncing until you resume it. A first
+sync never deletes anything on either side. The same preview appears after
+**Rebuild sync state** or a change of Drive folder, which are first syncs too.
 
 On each additional device, sign in and pick **the same folder**. The first sync
 pairs up files that already match, byte for byte, without transferring them.
@@ -127,7 +151,23 @@ on one side only is not a conflict; it is just a sync.
 | **Merge the changes** | Combines edits to different parts of a note — the usual shape after a device has been offline. Falls back to keeping both when the edits overlap, when the file is not text, or when the previous version is no longer in Drive's revision history. |
 | **Keep whichever was edited last** | Uses modification times. Falls back to keeping both when they tie, or when Drive has no recorded time for the file. |
 | **Keep this device's / Keep Drive** | The chosen side keeps the filename; the other is kept as a conflict copy unless you turn copies off. |
-| **Ask me each time** | Nothing is written. The file is skipped until you choose, via **Show sync conflicts** in the command palette. |
+| **Ask me each time** | Nothing is written. The file is skipped until you choose, via **Show sync conflicts** in the command palette or the status bar's right-click menu. |
+
+### Comparing versions
+
+Under **Ask me each time**, each file in **Show sync conflicts** has a
+**Compare** button. It shows this device's version against the one on Drive as
+a diff: lines only on this device in red with `-`, lines only on Drive in green
+with `+`, a few unchanged lines around each change, and the rest folded away.
+The Markdown is shown as source, so a changed link target or heading level is as
+visible as a changed word. **Keep both**, **Keep this device** and **Keep Drive**
+are right underneath.
+
+Under the other policies, a conflict usually leaves a conflict copy beside the
+note. Open either file and run **Compare with conflict copy** from the command
+palette, or click **Compare** in the conflict notice. From the diff you can keep
+the note and delete the copy, or replace the note with the copy. The copy goes
+to Obsidian's trash either way, so a wrong choice can be undone.
 
 Two cases ignore the setting, because there is no second version to choose
 between: if a file was **deleted on one device and edited on the other**, the
@@ -143,6 +183,26 @@ Files in the `.obsidian` folder never get conflict copies, since Obsidian would
 never read them. When a new device joins, Drive's copy wins. Otherwise the most
 recent edit wins.
 
+## Pausing, progress and troubleshooting
+
+Click the status bar item to sync now, or to resume when paused. Right-click it
+for **Pause syncing**, **Show sync conflicts** and the settings. The same
+actions are in the command palette, which is the only way on mobile, where
+Obsidian has no status bar.
+
+While paused, nothing is uploaded, downloaded or polled. Edits made in the
+meantime, on this device or elsewhere, are found by the full sync that runs when
+you resume. The pause is remembered across restarts.
+
+While a sync runs, the status bar shows how many files of the current pass have
+been checked (`Syncing 120/4000`), or the progress of a large transfer
+(`↑ lecture.mp4 45%`). When idle, it says how long ago the last sync finished.
+
+If something goes wrong, **Copy sync log** (in the command palette, or under
+**Recent activity** in settings) copies the recent log with the plugin and
+Obsidian versions, ready to paste into a bug report. It includes file names, so
+look it over before sharing it.
+
 ## What is never synced
 
 Regardless of settings: `.obsidian/workspace.json` and the other pane-layout and
@@ -151,7 +211,9 @@ settings (they belong to each device), `.trash/`, `.git/`, `.DS_Store`,
 `Thumbs.db`, and editor scratch files. `.obsidian` as a whole is excluded if you
 turn off **Sync Obsidian settings**.
 
-Add your own exclusions as globs — `Private/`, `**/*.pdf` — in settings.
+Add your own exclusions as globs — `Private/`, `**/*.pdf` — in settings. A
+pattern that would not do what it looks like, such as one with a leading `/` or
+Windows `\` separators, is flagged under the field as you type.
 
 ## Using several devices at once
 
@@ -210,7 +272,8 @@ tests rather than anecdotes.
 | `src/proton/` | SDK wiring: transport, session, credentials. |
 | `src/proton/account/` | Vendored from Proton's SDK repo — see its `VENDORED.md`. |
 
-Run the tests with `npm test`. They cover the reconciliation table, the merge,
+Run the tests with `npm test` and the Obsidian review rules with `npm run lint`;
+CI runs both. The tests cover the reconciliation table, the merge, the diff,
 path filtering, the state store and the HTTP transport — everything that can be
 exercised without a real vault and a real Proton account.
 
@@ -227,10 +290,55 @@ first launch, and the file is deleted.
 The sync state in `sync-state.json` holds paths, node ids and content hashes. No
 file contents, and no key material.
 
+## Permissions and disclosures
+
+Obsidian's plugin review flags some of what this plugin does. Here is each one
+and why it is there.
+
+- **Network.** The plugin talks to Proton's API (`*.proton.me`) and nothing
+  else, through Obsidian's `requestUrl`. File contents and names are encrypted
+  on the device before they leave it.
+- **Filesystem access outside the vault API (desktop only).** On desktop, files
+  over 32 MB are streamed with Node's `fs` and hashed with Node's `crypto`
+  instead of being read whole into memory, and downloads are written to a
+  temporary file beside the target and renamed into place once complete. Only
+  paths inside the vault are opened, resolved through the adapter's own
+  `getFullPath`. On mobile, where there is no Node, everything goes through the
+  adapter and large files are read whole.
+- **No telemetry.** The Drive SDK's metrics are dropped, not sent (see
+  `src/proton/telemetry.ts`).
+- **Clipboard.** Write only, and only when you ask: "Copy link" in the sign-in
+  dialog copies the Proton sign-in link, and "Copy sync log" copies the recent
+  log. The plugin never reads the clipboard.
+- **Dynamic code (`Function` / `new Function`).** Not in the plugin's own code.
+  It comes from two bundled libraries: `ttag`, the translation library inside
+  Proton's Drive SDK, which compiles plural-form rules, and `core-js`, whose
+  polyfills use it for feature detection (`Function("return this")` and an
+  async-generator probe). None of it runs on file contents or on anything
+  received from the network.
+- **Obsidian's secret storage** holds the Proton session; see
+  [Where your credentials live](#where-your-credentials-live).
+
 ## Licence
 
-MIT. Includes code vendored from
-[ProtonDriveApps/sdk](https://github.com/ProtonDriveApps/sdk) (MIT); see
+Copyright (C) 2026 maez.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
+
+GPL-3.0 because the built plugin bundles `@protontech/crypto`, which Proton
+publishes under GPL-3.0, so the `main.js` users install has to be distributed
+under the GPL anyway. Other bundled packages keep their own licences and are
+listed in a header at the top of `main.js`, among them Proton's OpenPGP.js fork
+(LGPL-3.0+) and several MIT and BSD packages, all compatible with the GPL.
+
+`src/proton/account/` is vendored from
+[ProtonDriveApps/sdk](https://github.com/ProtonDriveApps/sdk) and stays under
+its original MIT licence (© Proton AG); see `src/proton/account/LICENSE.md` and
 `src/proton/account/VENDORED.md`.
 
 Not affiliated with or endorsed by Proton AG.

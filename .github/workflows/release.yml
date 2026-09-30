@@ -1,5 +1,9 @@
 name: Release Obsidian Plugin
 
+# Runs when a tag is pushed, including the tag GitHub creates when a release is
+# published from the web UI with a new tag. The tag is the version: `0.3.0`,
+# not `v0.3.0`, because Obsidian looks for a release whose tag is exactly the
+# `version` in manifest.json.
 on:
   push:
     tags:
@@ -10,13 +14,33 @@ permissions:
   id-token: write
   attestations: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
 
+    env:
+      TAG: ${{ github.ref_name }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4.2.2
+        with:
+          # Full history, so the default branch can be compared with the tag.
+          fetch-depth: 0
+
+      - name: Check the tag is a version Obsidian accepts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' is not a bare semver version like 1.2.3. Obsidian matches the release tag against manifest.json's version exactly, so a 'v' prefix or any other form would publish a release it cannot find."
+            exit 1
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4.4.0
@@ -27,31 +51,61 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Update plugin version from tag
+      - name: Stamp the version into manifest.json, versions.json and package.json
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
-
           node -e '
             const fs = require("fs");
             const version = process.argv[1];
+            const write = (path, data) => fs.writeFileSync(path, `${JSON.stringify(data, null, 4)}\n`);
 
-            const manifestPath = "manifest.json";
-            const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+            const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
             manifest.version = version;
-            fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+            write("manifest.json", manifest);
 
-            const versionsPath = "versions.json";
-            const versions = JSON.parse(fs.readFileSync(versionsPath, "utf8"));
-            const minAppVersion = manifest.minAppVersion;
-            versions[version] = minAppVersion;
-            fs.writeFileSync(versionsPath, `${JSON.stringify(versions, null, 2)}\n`);
-          ' "$VERSION"
+            const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"));
+            versions[version] = manifest.minAppVersion;
+            write("versions.json", versions);
+          ' "$TAG"
+          npm version "$TAG" --no-git-tag-version --allow-same-version
+          git diff --stat
 
+      - name: Run tests
+        run: npm test
+
+      # esbuild bakes the manifest version into the bundle, so this comes after
+      # the stamp.
       - name: Build plugin
         run: npm run build
+
+      # Obsidian reads manifest.json from the default branch to learn that an
+      # update exists, so the stamped files have to land there, and the tag is
+      # moved onto that commit so the release's source matches its assets.
+      # Pushes made with GITHUB_TOKEN do not start workflows, so moving the tag
+      # does not run this job again.
+      - name: Commit the version to the default branch and move the tag onto it
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- manifest.json versions.json package.json package-lock.json; then
+            echo "Version files already say $TAG; nothing to commit."
+            exit 0
+          fi
+
+          git fetch origin "$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor "origin/$DEFAULT_BRANCH" HEAD; then
+            echo "::error::$DEFAULT_BRANCH has commits that $TAG does not. Tag the tip of $DEFAULT_BRANCH, or merge first, then delete and re-push the tag."
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json versions.json package.json package-lock.json
+          git commit -m "Release $TAG"
+          git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
+          git tag -f "$TAG"
+          git push -f origin "refs/tags/$TAG"
 
       - name: Generate artifact attestations
         uses: actions/attest-build-provenance@v2
@@ -61,74 +115,51 @@ jobs:
             styles.css
 
       - name: Extract changelog notes for this version
-        id: changelog
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"   # strip leading "v" if present
-          node -e "
-            const fs = require('fs');
-            if (!fs.existsSync('CHANGELOG.md')) { process.stdout.write(''); process.exit(0); }
-            const txt = fs.readFileSync('CHANGELOG.md', 'utf8');
-            const lines = txt.split('\n');
-            let capture = false;
+          node -e '
+            const fs = require("fs");
+            const version = process.argv[1];
+            if (!fs.existsSync("CHANGELOG.md")) process.exit(0);
             const out = [];
-            for (const line of lines) {
-              if (line.startsWith('## [' + '$VERSION' + ']')) { capture = true; continue; }
-              if (capture && line.startsWith('## [')) break;
+            let capture = false;
+            for (const line of fs.readFileSync("CHANGELOG.md", "utf8").split("\n")) {
+              if (line.startsWith(`## [${version}]`)) { capture = true; continue; }
+              if (capture && line.startsWith("## [")) break;
               if (capture) out.push(line);
             }
-            process.stdout.write(out.join('\n').trim());
-          " > /tmp/release_notes.md
-          # Fallback if the version wasn't found in CHANGELOG.md
-          if [ ! -s /tmp/release_notes.md ]; then
-            echo "Release ${GITHUB_REF_NAME}" > /tmp/release_notes.md
-          fi
+            process.stdout.write(out.join("\n").trim());
+          ' "$TAG" > "$RUNNER_TEMP/release_notes.md"
 
-      - name: Detect optional style file
-        id: package
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-
-          STYLE_FILE=""
-          if [ -f "styles.css" ]; then
-            STYLE_FILE="styles.css"
-          elif [ -f "style.css" ]; then
-            STYLE_FILE="style.css"
-          fi
-
-          echo "style_file=$STYLE_FILE" >> "$GITHUB_OUTPUT"
-
-      - name: Create or update release with changelog notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
+          NOTES="$RUNNER_TEMP/release_notes.md"
 
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release edit "$TAG" \
-              --title "$TAG" \
-              --notes-file /tmp/release_notes.md
+            # Published from the web UI: keep whatever notes were written there
+            # unless CHANGELOG.md has an entry for this version.
+            if [ -s "$NOTES" ]; then
+              gh release edit "$TAG" --notes-file "$NOTES"
+            fi
+          elif [ -s "$NOTES" ]; then
+            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES"
           else
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --notes-file /tmp/release_notes.md
+            gh release create "$TAG" --title "$TAG" --generate-notes
           fi
 
-      - name: Upload assets to tag release
+      - name: Upload assets to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          STYLE_FILE="${{ steps.package.outputs.style_file }}"
-
           ASSETS=(manifest.json main.js)
-          if [ -n "$STYLE_FILE" ]; then
-            ASSETS+=("$STYLE_FILE")
+          if [ -f styles.css ]; then
+            ASSETS+=(styles.css)
           fi
-
           gh release upload "$TAG" "${ASSETS[@]}" --clobber

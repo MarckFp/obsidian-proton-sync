@@ -48,7 +48,7 @@ export class SyncState {
     private remoteFolderUid: string | null = null;
 
     private dirty = false;
-    private flushTimer: ReturnType<typeof setTimeout> | null = null;
+    private flushTimer: number | null = null;
     private writing: Promise<void> = Promise.resolve();
 
     constructor(
@@ -233,7 +233,7 @@ export class SyncState {
 
     async flush(): Promise<void> {
         if (this.flushTimer !== null) {
-            clearTimeout(this.flushTimer);
+            window.clearTimeout(this.flushTimer);
             this.flushTimer = null;
         }
         if (!this.dirty) {
@@ -269,7 +269,7 @@ export class SyncState {
         if (this.flushTimer !== null) {
             return;
         }
-        this.flushTimer = setTimeout(() => {
+        this.flushTimer = window.setTimeout(() => {
             this.flushTimer = null;
             void this.flush();
         }, 1000);

@@ -159,7 +159,7 @@ export class ApiClient {
             return false;
         }
 
-        const data = (await response.json()) as RefreshResponseBody;
+        const data = await response.json<RefreshResponseBody>();
         const uid = data.UID ?? this.options.credentials.uid;
         const accessToken = data.AccessToken;
         if (!uid || !accessToken) {

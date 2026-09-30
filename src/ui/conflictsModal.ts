@@ -1,7 +1,9 @@
 import { App, Modal, Notice, Setting } from 'obsidian';
 
 import type ProtonDriveSyncPlugin from '../main';
+import { isTextPath } from '../sync/media';
 import type { ConflictInfo, ConflictReason } from '../sync/types';
+import { compareWithDrive } from './compare';
 
 const REASON_TEXT: Record<ConflictReason, string> = {
     'both-modified': 'Edited here and on another device since the last sync.',
@@ -57,9 +59,16 @@ export class ConflictsModal extends Modal {
     private renderConflict(container: HTMLElement, entry: { path: string; conflict: ConflictInfo }): void {
         const reason: ConflictReason = entry.conflict.reason;
 
-        new Setting(container)
-            .setName(entry.path)
-            .setDesc(REASON_TEXT[reason])
+        const setting = new Setting(container).setName(entry.path).setDesc(REASON_TEXT[reason]);
+        if (isTextPath(entry.path)) {
+            setting.addButton((button) =>
+                button
+                    .setButtonText('Compare')
+                    .setTooltip('Show what differs between this device and Drive')
+                    .onClick(() => compareWithDrive(this.plugin, entry.path, () => this.render())),
+            );
+        }
+        setting
             .addButton((button) =>
                 button
                     .setButtonText('Keep both')
