@@ -2,33 +2,10 @@ import { type App, Notice } from 'obsidian';
 
 import type { ConflictEvent } from '../sync/engine';
 import { isTextPath } from '../sync/media';
-import { basename } from '../sync/paths';
-import type { ConflictReason } from '../sync/types';
+import { outcomeText, REASON_TEXT } from './conflictText';
 
 /** Files listed by name; the rest are counted. */
 const MAX_LISTED = 5;
-
-const REASON_TEXT: Record<ConflictReason, string> = {
-    'both-modified': 'edited here and on another device',
-    'both-created': 'created here and on another device',
-    'deleted-remotely-modified-locally': 'deleted on another device but edited here',
-    'deleted-locally-modified-remotely': 'deleted here but edited on another device',
-};
-
-function outcomeText(event: ConflictEvent): string {
-    switch (event.outcome) {
-        case 'kept-both':
-            return `both kept, the other version is "${basename(event.copyPath ?? '')}"`;
-        case 'merged':
-            return 'the edits were merged';
-        case 'kept-local':
-            return 'this device’s version was kept';
-        case 'kept-remote':
-            return 'the version from Drive was kept';
-        case 'deferred':
-            return 'waiting for you to choose';
-    }
-}
 
 /**
  * Tell the user that a sync conflict happened, and to which files.
@@ -36,7 +13,8 @@ function outcomeText(event: ConflictEvent): string {
  * Every policy but `manual` settles a conflict on its own, which is the point,
  * but the result still deserves a look: a conflict copy nobody notices is a
  * second version of a note drifting on its own. The notice stays until it is
- * dismissed, and each file in it opens on click.
+ * dismissed, each file in it opens on click, and every conflict in it also
+ * stays listed in the conflicts dialog afterwards.
  */
 export type ConflictNoticeActions = {
     reviewConflicts: () => void;
@@ -83,15 +61,17 @@ export function showConflictNotice(app: App, events: ConflictEvent[], actions: C
             }
         }
         if (events.length > MAX_LISTED) {
-            root.createDiv({
-                text: `…and ${events.length - MAX_LISTED} more. The plugin settings list them under Recent activity.`,
-            });
+            root.createDiv({ text: `…and ${events.length - MAX_LISTED} more.` });
         }
 
-        if (events.some((event) => event.outcome === 'deferred')) {
-            const button = root.createEl('button', { text: 'Review conflicts', cls: 'mod-cta' });
-            button.addEventListener('click', () => actions.reviewConflicts());
-        }
+        // Always offered: closing the notice must not be the last chance to
+        // see these, so the conflicts dialog keeps a history of them.
+        const waiting = events.some((event) => event.outcome === 'deferred');
+        const button = root.createEl('button', {
+            text: waiting ? 'Review conflicts' : 'Show all conflicts',
+            cls: waiting ? 'mod-cta' : '',
+        });
+        button.addEventListener('click', () => actions.reviewConflicts());
     });
 
     new Notice(fragment, 0);

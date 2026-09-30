@@ -187,3 +187,99 @@
     color: var(--text-accent);
     font-size: var(--font-ui-smaller);
 }
+
+/* Sync panel (the status bar's stand-in on mobile) */
+
+.proton-drive-sync-spin svg {
+    animation: proton-drive-sync-rotate 1.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .proton-drive-sync-spin svg {
+        animation: none;
+    }
+}
+
+.proton-drive-sync-panel-header {
+    display: flex;
+    align-items: center;
+    gap: var(--size-4-2);
+    margin-bottom: var(--size-4-1);
+    font-size: var(--font-ui-large);
+    font-weight: var(--font-semibold);
+}
+
+.proton-drive-sync-panel-progress {
+    height: 6px;
+    margin: var(--size-4-3) 0;
+    border-radius: var(--radius-s);
+    background-color: var(--background-modifier-border);
+    overflow: hidden;
+}
+
+.proton-drive-sync-panel-progress-fill {
+    height: 100%;
+    background-color: var(--interactive-accent);
+    transition: width 0.25s ease-out;
+}
+
+.proton-drive-sync-panel-details {
+    padding-inline-start: var(--size-4-4);
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
+
+.proton-drive-sync-panel-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--size-4-2);
+    margin: var(--size-4-3) 0;
+}
+
+.proton-drive-sync-panel-heading {
+    margin-top: var(--size-4-4);
+    color: var(--text-muted);
+}
+
+/* Diff actions: each button in the colour and sign of the version it keeps */
+
+.proton-drive-sync-diff-hint {
+    margin-bottom: 0;
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+}
+
+.proton-drive-sync-diff-hint .mod-removed {
+    color: var(--color-red);
+}
+
+.proton-drive-sync-diff-hint .mod-added {
+    color: var(--color-green);
+}
+
+.proton-drive-sync-diff-actions .setting-item-control {
+    flex-wrap: wrap;
+}
+
+button.proton-drive-sync-diff-action {
+    color: var(--text-normal);
+    font-weight: var(--font-semibold);
+}
+
+button.proton-drive-sync-diff-action.mod-removed {
+    background-color: rgba(var(--color-red-rgb), 0.15);
+    box-shadow: inset 0 0 0 1px rgba(var(--color-red-rgb), 0.6);
+}
+
+button.proton-drive-sync-diff-action.mod-removed:hover {
+    background-color: rgba(var(--color-red-rgb), 0.28);
+}
+
+button.proton-drive-sync-diff-action.mod-added {
+    background-color: rgba(var(--color-green-rgb), 0.15);
+    box-shadow: inset 0 0 0 1px rgba(var(--color-green-rgb), 0.6);
+}
+
+button.proton-drive-sync-diff-action.mod-added:hover {
+    background-color: rgba(var(--color-green-rgb), 0.28);
+}

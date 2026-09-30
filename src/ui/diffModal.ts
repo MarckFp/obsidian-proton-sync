@@ -4,8 +4,13 @@ import { changedRange, diffLines, toSegments, type DiffLine } from '../sync/diff
 
 export type DiffAction = {
     label: string;
-    cta?: boolean;
-    destructive?: boolean;
+    /**
+     * Which version this action keeps: `removed` for the one shown in red
+     * with `-`, `added` for the one in green with `+`. The button takes the
+     * same colour and sign, so it is plain which lines a click keeps. Left
+     * out for an action that keeps both, which stays neutral.
+     */
+    keeps?: 'removed' | 'added';
     run: () => Promise<void>;
 };
 
@@ -123,15 +128,21 @@ export class DiffModal extends Modal {
         if (actions.length === 0) {
             return;
         }
+        const hint = this.contentEl.createEl('p', { cls: 'proton-drive-sync-diff-hint' });
+        hint.appendText('Choose the version to keep: ');
+        hint.createSpan({ cls: 'mod-removed', text: `red (−) keeps ${this.options.oldLabel}` });
+        hint.appendText(', ');
+        hint.createSpan({ cls: 'mod-added', text: `green (+) keeps ${this.options.newLabel}` });
+        hint.appendText('.');
+
         const setting = new Setting(this.contentEl);
+        setting.settingEl.addClass('proton-drive-sync-diff-actions');
         for (const action of actions) {
             setting.addButton((button) => {
-                button.setButtonText(action.label);
-                if (action.cta) {
-                    button.setCta();
-                }
-                if (action.destructive) {
-                    button.setDestructive();
+                const sign = action.keeps === 'removed' ? '− ' : action.keeps === 'added' ? '+ ' : '';
+                button.setButtonText(`${sign}${action.label}`);
+                if (action.keeps) {
+                    button.buttonEl.addClass('proton-drive-sync-diff-action', `mod-${action.keeps}`);
                 }
                 button.onClick(async () => {
                     button.setDisabled(true);

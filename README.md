@@ -29,8 +29,10 @@ same implementation Proton's own clients use.
 - **Conflict remediation**, from keeping both copies (the default — nothing is
   ever silently overwritten) to a line-level three-way merge that combines edits
   made to different parts of a note.
-- **Conflict notifications.** When a file changed in two places, a notice names
-  it and says how it was settled. Click the file name to open it.
+- **Conflict notifications and history.** When a file changed in two places, a
+  notice names it and says how it was settled. Click the file name to open it.
+  Closing the notice loses nothing: every conflict stays listed in **Show sync
+  conflicts**, with the note and its conflict copy one click away.
 - **Side-by-side comparison of conflicts.** See exactly what differs between two
   versions of a note, as a code review would show it: lines only in one version
   in red with `-`, lines only in the other in green with `+`, and the changed
@@ -166,6 +168,16 @@ on one side only is not a conflict; it is just a sync.
 | **Keep this device's / Keep Drive** | The chosen side keeps the filename; the other is kept as a conflict copy unless you turn copies off. |
 | **Ask me each time** | Nothing is written. The file is skipped until you choose, via **Show sync conflicts** in the command palette or the status bar's right-click menu. |
 
+### Keeping track of conflicts
+
+**Show sync conflicts** (command palette, status bar menu, or the sync panel's
+**Conflicts** button) lists two things. **Waiting on you** has the files **Ask me
+each time** left for a decision. **History** has every conflict this device has
+seen, newest first, however it was settled: when it happened, what happened, and
+buttons to open the note or compare it with its conflict copy while the copy is
+still there. Remove entries one by one or clear the lot; the most recent 200 are
+kept. The history belongs to each device and is not synced.
+
 ### Comparing versions
 
 Under **Ask me each time**, each file in **Show sync conflicts** has a
@@ -173,13 +185,15 @@ Under **Ask me each time**, each file in **Show sync conflicts** has a
 a diff: lines only on this device in red with `-`, lines only on Drive in green
 with `+`, a few unchanged lines around each change, and the rest folded away.
 The Markdown is shown as source, so a changed link target or heading level is as
-visible as a changed word. **Keep both**, **Keep this device** and **Keep Drive**
-are right underneath.
+visible as a changed word. The choices are right underneath, each in the colour
+and sign of the version it keeps: red **− Keep this device's version**, green
+**+ Keep the Drive version**, and a neutral **Keep both**.
 
 Under the other policies, a conflict usually leaves a conflict copy beside the
 note. Open either file and run **Compare with conflict copy** from the command
 palette, or click **Compare** in the conflict notice. From the diff you can keep
-the note and delete the copy, or replace the note with the copy. The copy goes
+the note and delete the copy (red, **−**), or replace the note with the copy
+(green, **+**). The copy goes
 to Obsidian's trash either way, so a wrong choice can be undone.
 
 Two cases ignore the setting, because there is no second version to choose
@@ -200,9 +214,18 @@ edit wins.
 ## Pausing, progress and troubleshooting
 
 Click the status bar item to sync now, or to resume when paused. Right-click it
-for **Pause syncing**, **Show sync conflicts** and the settings. The same
-actions are in the command palette, which is the only way on mobile, where
-Obsidian has no status bar.
+for **Pause syncing**, **Show sync conflicts**, the sync panel and the settings.
+
+The **sync panel** shows the same status in the right sidebar, with the details
+(progress, last sync, last error, recent activity) and buttons for **Sync now**,
+**Pause**/**Resume**, reviewing conflicts and the settings. Open it with **Open
+sync panel** from the command palette.
+
+On mobile, where Obsidian has no status bar, the panel takes its place, out of
+the way of the note until you swipe the right sidebar in. A sync icon in the
+ribbon shows the current state and opens the panel. Every command has an icon,
+so you can also put **Sync now** in the mobile toolbar (Settings → Toolbar), or
+make it the pull-down gesture (Settings → Mobile → Quick action).
 
 While paused, nothing is uploaded, downloaded or polled. Edits made in the
 meantime, on this device or elsewhere, are found by the full sync that runs when

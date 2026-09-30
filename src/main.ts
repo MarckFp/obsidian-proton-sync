@@ -3,9 +3,10 @@
 // load time.
 import './polyfills';
 
-import { apiVersion, type App, Notice, Platform, Plugin, TAbstractFile, TFile, TFolder } from 'obsidian';
+import { apiVersion, type App, Notice, Platform, Plugin, setIcon, setTooltip, TAbstractFile, TFile, TFolder } from 'obsidian';
 
 import { Credentials } from './proton/credentials';
+import { ConflictHistory } from './sync/conflictHistory';
 import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
 import { ProtonSession } from './proton/session';
 import { DEFAULT_SETTINGS, type PluginSettings } from './settings';
@@ -20,10 +21,13 @@ import { ReloadModal } from './ui/reloadModal';
 import { CONFLICT_POLICIES, ProtonDriveSyncSettingsTab } from './ui/settingsTab';
 import { SetupModal } from './ui/setupModal';
 import { StatusBar } from './ui/statusBar';
+import { SYNC_PANEL_VIEW, SyncPanelView } from './ui/syncPanel';
+import { statusIcon, statusLabel } from './ui/syncStatus';
 
 /** Where 0.1.0 kept the session; migrated into secret storage on first load. */
 const LEGACY_SESSION_FILE = 'session.json';
 const STATE_FILE = 'sync-state.json';
+const CONFLICT_HISTORY_FILE = 'conflict-history.json';
 /** Local-storage key for the installation id; see {@link ProtonDriveSyncPlugin.installationId}. */
 const CLIENT_UID_KEY = 'proton-drive-sync-client-uid';
 
@@ -53,9 +57,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     logger!: Logger;
     session!: ProtonSession;
     state!: SyncState;
+    conflictHistory!: ConflictHistory;
     engine!: SyncEngine;
 
     private statusBar!: StatusBar;
+    /** The ribbon icon standing in for the status bar on mobile; null on desktop. */
+    private ribbonIcon: HTMLElement | null = null;
+    /** What the status bar, ribbon icon and panel currently show. */
+    private summary!: SyncSummary;
     private pendingConflicts: ConflictEvent[] = [];
     private conflictNoticeTimer: number | null = null;
 
@@ -67,9 +76,27 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             syncNow: () => void this.syncNowOrSetUp(),
             togglePause: () => void this.setPaused(!this.settings.paused),
             showConflicts: () => new ConflictsModal(this.app, this).open(),
+            openPanel: () => void this.openPanel(),
             openSettings: () => this.openSettings(),
         });
-        this.registerInterval(window.setInterval(() => this.statusBar.refresh(), STATUS_REFRESH_MS));
+        this.registerView(
+            SYNC_PANEL_VIEW,
+            (leaf) =>
+                new SyncPanelView(leaf, {
+                    summary: () => this.summary,
+                    logEntries: () => this.logger.getEntries(),
+                    syncNow: () => void this.syncNowOrSetUp(),
+                    togglePause: () => void this.setPaused(!this.settings.paused),
+                    showConflicts: () => new ConflictsModal(this.app, this).open(),
+                    openSettings: () => this.openSettings(),
+                }),
+        );
+        // Obsidian's mobile app has no status bar, so there the ribbon, which
+        // it shows in the sidebar and the ribbon menu, carries the status.
+        if (Platform.isMobile) {
+            this.ribbonIcon = this.addRibbonIcon('refresh-cw', 'Proton Drive Sync', () => void this.openPanel());
+        }
+        this.registerInterval(window.setInterval(() => this.refreshStatus(), STATUS_REFRESH_MS));
 
         const clientUid = this.installationId();
         const protonLogger = this.logger.getLogger('proton');
@@ -88,6 +115,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             this.pluginFile(STATE_FILE),
             this.logger.getLogger('state'),
         );
+        this.conflictHistory = new ConflictHistory(
+            this.app.vault.adapter,
+            this.pluginFile(CONFLICT_HISTORY_FILE),
+            this.logger.getLogger('conflicts'),
+        );
+        await this.conflictHistory.load();
         this.engine = new SyncEngine(
             this.app,
             this.state,
@@ -105,6 +138,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             },
         );
 
+        this.summary = this.engine.getSummary();
         this.addSettingTab(new ProtonDriveSyncSettingsTab(this.app, this));
         this.registerCommands();
         this.registerVaultEvents();
@@ -223,16 +257,16 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             await this.session.init();
         } catch (error) {
             this.logger.error('Could not restore the Proton session', error);
-            this.statusBar.update({ ...this.engine.getSummary(), status: 'signed-out' });
+            this.showStatus({ ...this.engine.getSummary(), status: 'signed-out' });
             return;
         }
 
         if (!this.session.isSignedIn()) {
-            this.statusBar.update({ ...this.engine.getSummary(), status: 'signed-out' });
+            this.showStatus({ ...this.engine.getSummary(), status: 'signed-out' });
             return;
         }
         if (!this.settings.remoteFolderUid) {
-            this.statusBar.update({ ...this.engine.getSummary(), status: 'not-configured' });
+            this.showStatus({ ...this.engine.getSummary(), status: 'not-configured' });
             return;
         }
 
@@ -262,7 +296,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         if (!rootUid) {
             return true;
         }
-        this.statusBar.update({ ...this.engine.getSummary(), status: 'syncing' });
+        this.showStatus({ ...this.engine.getSummary(), status: 'syncing' });
 
         let plan: SyncPlan;
         try {
@@ -360,24 +394,28 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     private registerCommands(): void {
         this.addCommand({
             id: 'sync-now',
+            icon: 'refresh-cw',
             name: 'Sync now',
             callback: () => void this.syncNowOrSetUp(),
         });
 
         this.addCommand({
             id: 'open-setup',
+            icon: 'wand',
             name: 'Open setup assistant',
             callback: () => this.openSetup(),
         });
 
         this.addCommand({
             id: 'show-conflicts',
+            icon: 'alert-circle',
             name: 'Show sync conflicts',
             callback: () => new ConflictsModal(this.app, this).open(),
         });
 
         this.addCommand({
             id: 'pause-sync',
+            icon: 'pause-circle',
             name: 'Pause syncing',
             checkCallback: (checking) => {
                 if (this.settings.paused) {
@@ -392,6 +430,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
 
         this.addCommand({
             id: 'resume-sync',
+            icon: 'play-circle',
             name: 'Resume syncing',
             checkCallback: (checking) => {
                 if (!this.settings.paused) {
@@ -406,6 +445,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
 
         this.addCommand({
             id: 'compare-conflict-copy',
+            icon: 'git-compare',
             name: 'Compare with conflict copy',
             checkCallback: (checking) => {
                 const file = this.app.workspace.getActiveFile();
@@ -420,7 +460,15 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         });
 
         this.addCommand({
+            id: 'open-panel',
+            icon: 'cloud',
+            name: 'Open sync panel',
+            callback: () => void this.openPanel(),
+        });
+
+        this.addCommand({
             id: 'copy-log',
+            icon: 'clipboard-copy',
             name: 'Copy sync log',
             callback: () => void this.copyLog(),
         });
@@ -456,7 +504,45 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     private onSyncChange(summary: SyncSummary): void {
+        this.showStatus(summary);
+    }
+
+    /** Show a summary everywhere the sync's state appears. */
+    private showStatus(summary: SyncSummary): void {
+        this.summary = summary;
         this.statusBar.update(summary);
+        if (this.ribbonIcon) {
+            setIcon(this.ribbonIcon, statusIcon(summary));
+            this.ribbonIcon.toggleClass('proton-drive-sync-spin', summary.status === 'syncing');
+            setTooltip(this.ribbonIcon, `Proton Drive Sync: ${statusLabel(summary)}`);
+        }
+        for (const leaf of this.app.workspace.getLeavesOfType(SYNC_PANEL_VIEW)) {
+            if (leaf.view instanceof SyncPanelView) {
+                leaf.view.update(summary);
+            }
+        }
+    }
+
+    /** Re-show the current summary, so "synced 5m ago" keeps counting. */
+    private refreshStatus(): void {
+        if (this.summary) {
+            this.showStatus(this.summary);
+        }
+    }
+
+    /** Reveal the sync panel, opening it in the right sidebar if it is not open yet. */
+    async openPanel(): Promise<void> {
+        const { workspace } = this.app;
+        let leaf = workspace.getLeavesOfType(SYNC_PANEL_VIEW)[0];
+        if (!leaf) {
+            const created = workspace.getRightLeaf(false);
+            if (!created) {
+                return;
+            }
+            await created.setViewState({ type: SYNC_PANEL_VIEW, active: true });
+            leaf = created;
+        }
+        await workspace.revealLeaf(leaf);
     }
 
     /**
@@ -464,6 +550,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * twenty of them shows one notice, not twenty.
      */
     private onConflict(event: ConflictEvent): void {
+        void this.conflictHistory.add(event);
         this.pendingConflicts.push(event);
         if (this.conflictNoticeTimer !== null) {
             return;

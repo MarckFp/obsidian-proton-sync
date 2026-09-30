@@ -33,9 +33,9 @@ export function compareWithDrive(plugin: ProtonDriveSyncPlugin, path: string, on
             return { oldText, newText: remote === null ? '' : new TextDecoder().decode(remote) };
         },
         actions: [
-            { label: 'Keep both', cta: true, run: resolve('keep-both') },
-            { label: 'Keep this device', run: resolve('prefer-local') },
-            { label: 'Keep Drive', run: resolve('prefer-remote') },
+            { label: 'Keep this device’s version', keeps: 'removed', run: resolve('prefer-local') },
+            { label: 'Keep both', run: resolve('keep-both') },
+            { label: 'Keep the Drive version', keeps: 'added', run: resolve('prefer-remote') },
         ],
     }).open();
 }
@@ -58,15 +58,15 @@ export function compareWithConflictCopy(app: App, originalPath: string, copyPath
         actions: [
             {
                 label: 'Keep the note, delete the copy',
-                cta: true,
+                keeps: 'removed',
                 run: async () => {
                     await trash(app, copyPath);
                     new Notice(`Kept "${basename(originalPath)}".`);
                 },
             },
             {
-                label: 'Use the copy',
-                destructive: true,
+                label: 'Replace the note with the copy',
+                keeps: 'added',
                 run: async () => {
                     const original = app.vault.getFileByPath(originalPath);
                     const copy = app.vault.getFileByPath(copyPath);

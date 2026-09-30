@@ -1,11 +1,13 @@
 import { App, Modal, Notice, Setting } from 'obsidian';
 
 import type ProtonDriveSyncPlugin from '../main';
+import type { ConflictRecord } from '../sync/conflictHistory';
 import { isTextPath } from '../sync/media';
 import type { ConflictInfo, ConflictReason } from '../sync/types';
-import { compareWithDrive } from './compare';
+import { compareWithConflictCopy, compareWithDrive } from './compare';
+import { outcomeText, REASON_TEXT } from './conflictText';
 
-const REASON_TEXT: Record<ConflictReason, string> = {
+const PENDING_REASON_TEXT: Record<ConflictReason, string> = {
     'both-modified': 'Edited here and on another device since the last sync.',
     'both-created': 'Created independently here and on another device.',
     'deleted-remotely-modified-locally': 'Deleted on another device, but edited here.',
@@ -13,10 +15,12 @@ const REASON_TEXT: Record<ConflictReason, string> = {
 };
 
 /**
- * Lists the files waiting on a decision, under the `manual` conflict policy.
+ * Every conflict this device knows about, in two parts.
  *
- * Only reachable in that mode: every other policy resolves conflicts as they
- * are found, and leaves a conflict copy in the vault rather than an entry here.
+ * "Waiting on you" lists the files the `manual` policy left for a decision.
+ * "History" lists every conflict reported so far, however it was settled, so
+ * that closing a notice never loses track of one: each can be opened, and
+ * compared with its conflict copy for as long as the copy is there.
  */
 export class ConflictsModal extends Modal {
     constructor(
@@ -27,6 +31,7 @@ export class ConflictsModal extends Modal {
     }
 
     override onOpen(): void {
+        this.setTitle('Sync conflicts');
         this.render();
     }
 
@@ -37,29 +42,31 @@ export class ConflictsModal extends Modal {
     private render(): void {
         const { contentEl } = this;
         contentEl.empty();
-        contentEl.createEl('h2', { text: 'Sync conflicts' });
+        this.renderPending(contentEl);
+        this.renderHistory(contentEl);
+    }
 
+    // -- waiting on a decision ---------------------------------------------
+
+    private renderPending(container: HTMLElement): void {
         const conflicts = this.plugin.state.conflicts();
         if (conflicts.length === 0) {
-            contentEl.createEl('p', { text: 'Nothing is waiting on a decision.' });
             return;
         }
-
-        contentEl.createEl('p', {
+        new Setting(container).setName('Waiting on you').setHeading();
+        container.createEl('p', {
+            cls: 'proton-drive-sync-muted',
             text:
                 'These files changed in two places at once. Nothing has been overwritten — ' +
                 'choose which version to keep, or keep both.',
         });
-
         for (const entry of conflicts) {
-            this.renderConflict(contentEl, entry);
+            this.renderPendingEntry(container, entry);
         }
     }
 
-    private renderConflict(container: HTMLElement, entry: { path: string; conflict: ConflictInfo }): void {
-        const reason: ConflictReason = entry.conflict.reason;
-
-        const setting = new Setting(container).setName(entry.path).setDesc(REASON_TEXT[reason]);
+    private renderPendingEntry(container: HTMLElement, entry: { path: string; conflict: ConflictInfo }): void {
+        const setting = new Setting(container).setName(entry.path).setDesc(PENDING_REASON_TEXT[entry.conflict.reason]);
         if (isTextPath(entry.path)) {
             setting.addButton((button) =>
                 button
@@ -94,4 +101,87 @@ export class ConflictsModal extends Modal {
             this.render();
         }
     }
+
+    // -- history -----------------------------------------------------------
+
+    private renderHistory(container: HTMLElement): void {
+        const history = this.plugin.conflictHistory;
+        const records = history.entries();
+
+        const heading = new Setting(container).setName('History').setHeading();
+        if (records.length > 0) {
+            heading.addButton((button) =>
+                button.setButtonText('Clear history').onClick(async () => {
+                    await history.clear();
+                    this.render();
+                }),
+            );
+        }
+
+        if (records.length === 0) {
+            container.createEl('p', {
+                cls: 'proton-drive-sync-muted',
+                text:
+                    this.plugin.state.conflicts().length === 0
+                        ? 'No conflicts yet. Any that happen are listed here, however they were settled.'
+                        : 'No settled conflicts yet.',
+            });
+            return;
+        }
+
+        container.createEl('p', {
+            cls: 'proton-drive-sync-muted',
+            text: 'Conflicts this device has seen, newest first. Only the most recent 200 are kept.',
+        });
+        for (const record of records) {
+            this.renderRecord(container, record);
+        }
+    }
+
+    private renderRecord(container: HTMLElement, record: ConflictRecord): void {
+        const { vault, workspace } = this.app;
+        const copyExists = record.copyPath !== undefined && vault.getFileByPath(record.copyPath) !== null;
+
+        let description = `${new Date(record.time).toLocaleString()} · ${capitalise(REASON_TEXT[record.reason])}; ${outcomeText(record)}.`;
+        if (record.copyPath !== undefined && !copyExists) {
+            description += ' The copy has since been removed.';
+        }
+
+        const setting = new Setting(container).setName(record.path).setDesc(description);
+        setting.settingEl.addClass('proton-drive-sync-history-entry');
+
+        if (vault.getFileByPath(record.path)) {
+            setting.addButton((button) =>
+                button.setButtonText('Open').onClick(() => {
+                    this.close();
+                    void workspace.openLinkText(record.path, '', false);
+                }),
+            );
+        }
+        if (copyExists && isTextPath(record.path) && record.copyPath !== undefined) {
+            const copyPath = record.copyPath;
+            setting.addButton((button) =>
+                button
+                    .setButtonText('Compare')
+                    .setTooltip('Show what differs between the note and its conflict copy')
+                    .onClick(() => {
+                        this.close();
+                        compareWithConflictCopy(this.app, record.path, copyPath);
+                    }),
+            );
+        }
+        setting.addExtraButton((button) =>
+            button
+                .setIcon('x')
+                .setTooltip('Remove from history')
+                .onClick(async () => {
+                    await this.plugin.conflictHistory.remove(record);
+                    this.render();
+                }),
+        );
+    }
+}
+
+function capitalise(text: string): string {
+    return text.charAt(0).toUpperCase() + text.slice(1);
 }
