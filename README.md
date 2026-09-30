@@ -332,7 +332,10 @@ file contents, and no key material.
 the local copy is deleted, so a copy of it that anyone might have taken stops
 working too. If Proton cannot be reached, the local copy is deleted anyway and
 you are told to revoke the session under account.proton.me → Security →
-Sessions.
+Sessions. Signing out also forgets the chosen Drive folder and its sync state,
+since both belong to that account: after signing in again, choose the folder
+anew. Nothing is deleted on Drive or in the vault, and the first sync pairs up
+the files that already match.
 
 ### Protecting the sign-in with a PIN
 
@@ -345,8 +348,20 @@ An optional **PIN** closes that gap. Set it up in the setup assistant or under
 **Settings → Proton Drive Sync → Account → PIN**. The session is then stored
 encrypted (AES-256-GCM, with a key derived from the PIN by PBKDF2-SHA256 at
 600,000 iterations), and Obsidian asks for the PIN when it starts; nothing syncs
-until it is entered. Changing or removing the PIN, and signing out, ask for it
-first. After a few wrong tries each further try waits, longer every time.
+until it is entered. While locked, the sync icon in the status bar (desktop) and
+the ribbon (mobile) shows a lock. Changing or removing the PIN, and signing out,
+ask for it first. After a few wrong tries each further try waits, longer every
+time. The eye button next to each PIN field shows what you typed.
+
+**Ask for the PIN** sets when it is asked for again: every time Obsidian opens
+(the default), or after 1, 5, 10, 30 or 60 minutes without using Obsidian. With
+a time limit, syncing stops and the PIN is asked for once the time runs out, and
+reopening Obsidian within the limit does not ask. That convenience has a cost:
+to survive a restart, the unlocked key is kept in Obsidian's keychain until the
+limit runs out, and while it is there the sign-in is protected only as well as
+without a PIN. If Obsidian stays closed past the limit, the key stays in the
+keychain until it next runs, when it is deleted. "Every time Obsidian opens"
+never keeps it.
 
 - **The PIN is stored nowhere.** Forget it and it cannot be recovered: **Forgot
   PIN** in the unlock prompt deletes the locked sign-in from the device, and you

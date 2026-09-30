@@ -69,7 +69,7 @@ export class UnlockModal extends Modal {
             error.setText(next > 0 ? `Wrong PIN. Try again in ${next} seconds.` : 'Wrong PIN.');
         };
 
-        new Setting(contentEl).setName('PIN').addText((text) => {
+        const field = new Setting(contentEl).setName('PIN').addText((text) => {
             input = text;
             text.inputEl.type = 'password';
             text.inputEl.autocomplete = 'current-password';
@@ -79,6 +79,7 @@ export class UnlockModal extends Modal {
                 }
             });
         });
+        addRevealButton(field, input);
 
         new Setting(contentEl)
             .addButton((button) =>
@@ -272,11 +273,28 @@ export class PinFormModal extends Modal {
 
     private passwordField(name: string, autocomplete: AutoFill): TextComponent {
         let field!: TextComponent;
-        new Setting(this.contentEl).setName(name).addText((text) => {
+        const setting = new Setting(this.contentEl).setName(name).addText((text) => {
             field = text;
             text.inputEl.type = 'password';
             text.inputEl.autocomplete = autocomplete;
         });
+        addRevealButton(setting, field);
         return field;
     }
+}
+
+/**
+ * An eye button that shows the PIN as typed, and hides it again. Hidden by
+ * default, since the screen may be in view of others; a PIN mistyped where
+ * it cannot be seen is otherwise only found out at the next unlock.
+ */
+function addRevealButton(setting: Setting, field: TextComponent): void {
+    setting.addExtraButton((button) => {
+        const show = (visible: boolean) => {
+            field.inputEl.type = visible ? 'text' : 'password';
+            button.setIcon(visible ? 'eye-off' : 'eye').setTooltip(visible ? 'Hide PIN' : 'Show PIN');
+        };
+        show(false);
+        button.onClick(() => show(field.inputEl.type === 'password'));
+    });
 }

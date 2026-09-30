@@ -37,6 +37,7 @@ export class SyncPanelView extends ItemView {
     private progressEl!: HTMLElement;
     private progressFillEl!: HTMLElement;
     private detailsEl!: HTMLElement;
+    private syncButton!: ButtonComponent;
     private pauseButton!: ButtonComponent;
     private conflictsButton!: ButtonComponent;
     private logEl!: HTMLElement;
@@ -76,11 +77,7 @@ export class SyncPanelView extends ItemView {
         this.detailsEl = root.createEl('ul', { cls: 'proton-drive-sync-panel-details' });
 
         const actions = root.createDiv({ cls: 'proton-drive-sync-panel-actions' });
-        new ButtonComponent(actions)
-            .setButtonText('Sync now')
-            .setIcon('refresh-cw')
-            .setCta()
-            .onClick(() => this.host.syncNow());
+        this.syncButton = new ButtonComponent(actions).setCta().onClick(() => this.host.syncNow());
         this.pauseButton = new ButtonComponent(actions).onClick(() => this.host.togglePause());
         this.conflictsButton = new ButtonComponent(actions).setIcon('alert-circle').onClick(() => this.host.showConflicts());
         new ButtonComponent(actions)
@@ -117,6 +114,11 @@ export class SyncPanelView extends ItemView {
         for (const line of statusDetails(summary)) {
             this.detailsEl.createEl('li', { text: line });
         }
+
+        // Locked, the main action is unlocking: that is what "sync now" does then.
+        const locked = summary.status === 'locked';
+        this.syncButton.setButtonText(locked ? 'Unlock' : 'Sync now').setIcon(locked ? 'lock-open' : 'refresh-cw');
+        this.pauseButton.buttonEl.toggle(!locked);
 
         const paused = summary.status === 'paused';
         this.pauseButton.setButtonText(paused ? 'Resume' : 'Pause').setIcon(paused ? 'play-circle' : 'pause-circle');

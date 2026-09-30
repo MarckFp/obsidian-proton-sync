@@ -131,6 +131,11 @@ export class Credentials implements SessionCredentials {
         await this.persist();
     }
 
+    /** Drop the session from memory, leaving it stored; for locking with the PIN. */
+    unload(): void {
+        this.session = null;
+    }
+
     async signOut(): Promise<void> {
         this.session = null;
         await this.slot.write(null);

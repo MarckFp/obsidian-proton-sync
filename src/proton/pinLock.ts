@@ -38,7 +38,8 @@ type Envelope = {
     data: string;
 };
 
-type UnlockedKey = { key: CryptoKey; salt: Uint8Array<ArrayBuffer>; iterations: number };
+/** The key derived from the PIN, with the parameters it was derived under. `raw` exists only for {@link RememberedUnlock}. */
+type UnlockedKey = { key: CryptoKey; raw: Uint8Array<ArrayBuffer>; salt: Uint8Array<ArrayBuffer>; iterations: number };
 
 /** Reading a PIN-protected session before {@link PinProtectedSlot.unlock}. */
 export class LockedError extends Error {
@@ -126,7 +127,8 @@ export class PinProtectedSlot implements SecretSlot {
             throw new Error('Sign in to Proton first; there is no session to protect yet');
         }
         const salt = crypto.getRandomValues(new Uint8Array(16));
-        this.unlocked = { key: await deriveKey(pin, salt, this.iterations), salt, iterations: this.iterations };
+        const raw = await deriveKeyBytes(pin, salt, this.iterations);
+        this.unlocked = { key: await importAesKey(raw), raw, salt, iterations: this.iterations };
         await this.write(session);
     }
 
@@ -136,6 +138,40 @@ export class PinProtectedSlot implements SecretSlot {
         this.unlocked = null;
         if (session !== null) {
             await this.inner.write(session);
+        }
+    }
+
+    /** Forget the key in memory, so the session needs the PIN again. Nothing stored changes. */
+    lock(): void {
+        this.unlocked = null;
+    }
+
+    /** The unlocked key, serialised for {@link RememberedUnlock}; null while locked. */
+    exportKey(): string | null {
+        if (!this.unlocked) {
+            return null;
+        }
+        return JSON.stringify({ key: toBase64(this.unlocked.raw), salt: toBase64(this.unlocked.salt) });
+    }
+
+    /** Unlock with a key from {@link exportKey}. False if it does not open the stored session. */
+    async unlockWithKey(exported: string): Promise<boolean> {
+        const envelope = parseEnvelope((await this.inner.read()) ?? '');
+        if (!envelope) {
+            return false;
+        }
+        try {
+            const { key, salt } = JSON.parse(exported) as { key: string; salt: string };
+            if (salt !== envelope.salt) {
+                return false;
+            }
+            const raw = fromBase64(key);
+            const aesKey = await importAesKey(raw);
+            await decrypt(envelope, aesKey);
+            this.unlocked = { key: aesKey, raw, salt: fromBase64(salt), iterations: envelope.iterations };
+            return true;
+        } catch {
+            return false;
         }
     }
 
@@ -150,33 +186,37 @@ export class PinProtectedSlot implements SecretSlot {
     }
 
     private async keyFor(pin: string): Promise<UnlockedKey | null> {
-        const raw = await this.inner.read();
-        const envelope = raw === null ? null : parseEnvelope(raw);
+        const stored = await this.inner.read();
+        const envelope = stored === null ? null : parseEnvelope(stored);
         if (!envelope) {
             return null;
         }
         const salt = fromBase64(envelope.salt);
-        const key = await deriveKey(pin, salt, envelope.iterations);
+        const raw = await deriveKeyBytes(pin, salt, envelope.iterations);
+        const key = await importAesKey(raw);
         try {
             await decrypt(envelope, key);
         } catch {
             return null;
         }
-        return { key, salt, iterations: envelope.iterations };
+        return { key, raw, salt, iterations: envelope.iterations };
     }
 }
 
-async function deriveKey(pin: string, salt: Uint8Array<ArrayBuffer>, iterations: number): Promise<CryptoKey> {
+async function deriveKeyBytes(
+    pin: string,
+    salt: Uint8Array<ArrayBuffer>,
+    iterations: number,
+): Promise<Uint8Array<ArrayBuffer>> {
     const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, [
-        'deriveKey',
+        'deriveBits',
     ]);
-    return crypto.subtle.deriveKey(
-        { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
-        material,
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['encrypt', 'decrypt'],
-    );
+    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, material, 256);
+    return new Uint8Array(bits);
+}
+
+function importAesKey(raw: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
+    return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 }
 
 async function encrypt(plaintext: string, unlocked: UnlockedKey): Promise<Envelope> {
@@ -239,4 +279,49 @@ function fromBase64(text: string): Uint8Array<ArrayBuffer> {
         bytes[i] = binary.charCodeAt(i);
     }
     return bytes;
+}
+
+/**
+ * An unlocked PIN key kept across restarts, until it expires, for the "ask
+ * for the PIN after some time away" setting.
+ *
+ * This is the one place the key leaves memory, and it is a real weakening:
+ * while a remembered key is stored, anyone who can read Obsidian's keychain
+ * can open the session without the PIN, exactly as if there were none. The
+ * expiry is a timestamp stored beside the key, not something cryptography
+ * enforces: an expired key is deleted the next time the plugin looks, and
+ * until then it is still there to be read. Only used when the user picks a
+ * time limit; the default, a PIN at every launch, never stores it.
+ */
+export class RememberedUnlock {
+    constructor(
+        private readonly slot: SecretSlot,
+        private readonly now: () => number = () => Date.now(),
+    ) {}
+
+    async save(exportedKey: string, expiresAt: number): Promise<void> {
+        await this.slot.write(JSON.stringify({ exportedKey, expiresAt }));
+    }
+
+    /** The key, if one is stored and has not expired. An expired one is deleted. */
+    async load(): Promise<string | null> {
+        const raw = await this.slot.read();
+        if (raw === null) {
+            return null;
+        }
+        try {
+            const { exportedKey, expiresAt } = JSON.parse(raw) as { exportedKey?: unknown; expiresAt?: unknown };
+            if (typeof exportedKey === 'string' && typeof expiresAt === 'number' && expiresAt > this.now()) {
+                return exportedKey;
+            }
+        } catch {
+            // Unreadable: treated as expired.
+        }
+        await this.clear();
+        return null;
+    }
+
+    async clear(): Promise<void> {
+        await this.slot.write(null);
+    }
 }

@@ -35,7 +35,7 @@ const PRESENTATION: Record<SyncStatus, Presentation> = {
     },
     locked: {
         icon: 'lock',
-        label: 'Locked',
+        label: 'Sync locked',
         description: 'Your sign-in is protected with a PIN. Enter it to start syncing.',
     },
     'waiting-for-wifi': {
@@ -48,13 +48,23 @@ const PRESENTATION: Record<SyncStatus, Presentation> = {
 /** Longest file name shown in a label before it is shortened. */
 const MAX_NAME_LENGTH = 24;
 
-/** The icon for the current state; a conflict waiting on the user outranks everything else. */
+/**
+ * The icon for the current state. Being locked outranks everything, since
+ * nothing syncs until the PIN is entered; after that, a conflict waiting on
+ * the user does.
+ */
 export function statusIcon(summary: SyncSummary): string {
+    if (summary.status === 'locked') {
+        return PRESENTATION.locked.icon;
+    }
     return summary.conflicts > 0 ? 'alert-circle' : PRESENTATION[summary.status].icon;
 }
 
 /** One short line: "Synced 5m ago", "Syncing 12/340", "↑ video.mp4 45%", "2 conflicts". */
 export function statusLabel(summary: SyncSummary): string {
+    if (summary.status === 'locked') {
+        return PRESENTATION.locked.label;
+    }
     if (summary.conflicts > 0) {
         return `${summary.conflicts} conflict${summary.conflicts === 1 ? '' : 's'}`;
     }

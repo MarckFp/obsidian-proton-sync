@@ -6,7 +6,7 @@ import './polyfills';
 import { apiVersion, type App, Notice, Platform, Plugin, setIcon, setTooltip, TAbstractFile, TFile, TFolder } from 'obsidian';
 
 import { Credentials } from './proton/credentials';
-import { PinProtectedSlot } from './proton/pinLock';
+import { PinProtectedSlot, RememberedUnlock } from './proton/pinLock';
 import { ConflictHistory } from './sync/conflictHistory';
 import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
 import { ProtonSession } from './proton/session';
@@ -39,6 +39,11 @@ const CONFLICT_NOTICE_DELAY_MS = 1500;
 /** How often the status bar's "synced 5m ago" is brought up to date. */
 const STATUS_REFRESH_MS = 30_000;
 
+/** How often the PIN's time limit is checked while Obsidian is open. */
+const LOCK_CHECK_MS = 15_000;
+/** How often, at most, a remembered unlock's expiry is pushed back while Obsidian is in use. */
+const REMEMBER_SAVE_MS = 60_000;
+
 /**
  * The Network Information API, where the WebView has it: Android does, iOS
  * does not. Only `type` is used, to tell cellular from Wi-Fi.
@@ -69,6 +74,11 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     /** Wrong PINs entered so far in this run; see {@link UnlockModal}. */
     private readonly pinFailures = { count: 0 };
     private unlocking: Promise<boolean> | null = null;
+    /** The unlocked PIN key, kept across restarts when the PIN has a time limit. */
+    private rememberedUnlock!: RememberedUnlock;
+    /** Last time the user did anything in Obsidian; measures "away" for the PIN's time limit. */
+    private lastActivity = Date.now();
+    private lastRememberSave = 0;
     private settingsTab: ProtonDriveSyncSettingsTab | null = null;
     /** What the settings tab last rendered from; see {@link refreshSettingsTab}. */
     private settingsTabKey = '';
@@ -116,6 +126,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         const protonLogger = this.logger.getLogger('proton');
         this.sessionSlot = new PinProtectedSlot(
             new ObsidianSecretSlot(this.app.secretStorage, `proton-drive-sync-session-${clientUid}`),
+        );
+        this.rememberedUnlock = new RememberedUnlock(
+            new ObsidianSecretSlot(this.app.secretStorage, `proton-drive-sync-unlock-${clientUid}`),
         );
         const credentials = new Credentials(
             this.sessionSlot,
@@ -181,6 +194,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         // Obsidian does not wait for unload, so there is nothing to hand the
         // promise to; `stop` cancels timers synchronously before it awaits.
         void this.engine.stop();
+        void this.rememberUnlock();
     }
 
     openSetup(): void {
@@ -264,9 +278,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 onDone: (result) => {
                     if (result === 'unlocked') {
                         this.locked = false;
+                        this.markActive();
+                        void this.rememberUnlock();
                     } else if (result === 'forgotten') {
                         this.locked = false;
                         this.pinEnabled = false;
+                        void this.rememberedUnlock.clear();
                         this.showStatus({ ...this.engine.getSummary(), status: 'signed-out' });
                         this.notify('the locked sign-in was deleted. Sign in again to keep syncing.');
                     }
@@ -291,6 +308,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                     await this.sessionSlot.setPin(newPin);
                 }
                 this.pinEnabled = mode !== 'remove';
+                this.markActive();
+                // A new PIN means a new key, and no PIN means nothing to remember.
+                await this.rememberUnlock();
                 this.refreshSettingsTab();
                 this.notify(
                     mode === 'set'
@@ -302,6 +322,75 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             },
             onDone: () => onDone?.(),
         }).open();
+    }
+
+    /** The time limit for the PIN changed in the settings. */
+    async onPinLockAfterChanged(): Promise<void> {
+        this.markActive();
+        await this.rememberUnlock();
+    }
+
+    private markActive(): void {
+        this.lastActivity = Date.now();
+    }
+
+    /** The PIN has a time limit, and it has run out since the user last did anything. */
+    private lockDue(): boolean {
+        const minutes = this.settings.pinLockAfterMinutes;
+        return (
+            minutes > 0 &&
+            this.pinEnabled &&
+            !this.locked &&
+            this.session.isSignedIn() &&
+            Date.now() - this.lastActivity >= minutes * 60_000
+        );
+    }
+
+    /** Something happened in Obsidian: lock if the time limit ran out first, otherwise restart the clock. */
+    private onActivity(): void {
+        if (this.lockDue()) {
+            void this.lockNow();
+            return;
+        }
+        this.markActive();
+        if (Date.now() - this.lastRememberSave >= REMEMBER_SAVE_MS) {
+            void this.rememberUnlock();
+        }
+    }
+
+    /**
+     * Keep the unlocked key until the time limit runs out, counted from the
+     * last activity, so reopening Obsidian within it does not ask for the PIN;
+     * or delete it, when there is no time limit or nothing unlocked.
+     */
+    private async rememberUnlock(): Promise<void> {
+        const minutes = this.settings.pinLockAfterMinutes;
+        const key = this.sessionSlot.exportKey();
+        if (minutes <= 0 || !this.pinEnabled || this.locked || key === null) {
+            await this.rememberedUnlock.clear();
+            return;
+        }
+        this.lastRememberSave = Date.now();
+        await this.rememberedUnlock.save(key, this.lastActivity + minutes * 60_000);
+    }
+
+    /**
+     * The time limit ran out: stop syncing, drop the session from memory, and
+     * ask for the PIN. The session stays stored, encrypted, and nothing else
+     * is lost; unlocking picks up where it left off.
+     */
+    private async lockNow(): Promise<void> {
+        if (this.locked) {
+            return;
+        }
+        this.locked = true;
+        this.logger.info(`Locked after ${this.settings.pinLockAfterMinutes} minute(s) away`);
+        await this.engine.stop();
+        this.session.lock();
+        this.sessionSlot.lock();
+        await this.rememberedUnlock.clear();
+        this.showStatus({ ...this.engine.getSummary(), status: 'locked' });
+        await this.connect();
     }
 
     /** Resolve true once the user has entered the right PIN, or straight away when there is none. */
@@ -323,13 +412,26 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     /**
      * Sign out: with the PIN first when there is one, then ending the session
      * on Proton's side before forgetting it here.
+     *
+     * The chosen Drive folder, and the sync state that describes it, go too.
+     * Both belong to the account being signed out of, and the next sign-in
+     * may be a different one, where that folder id means nothing, or the
+     * same account wanting a different folder. Nothing is deleted on Drive
+     * or in the vault; signing in again and choosing a folder starts a fresh
+     * first sync, which pairs up files that already match.
      */
     async signOut(): Promise<void> {
         if (!(await this.confirmPin('sign out'))) {
             return;
         }
+        await this.engine.stop();
         const { revoked } = await this.session.signOut();
         this.pinEnabled = false;
+        await this.rememberedUnlock.clear();
+        this.settings.remoteFolderUid = null;
+        this.settings.remoteFolderPath = null;
+        await this.saveSettings();
+        await this.state.reset();
         this.refreshSettingsTab();
         this.notify(
             revoked
@@ -365,6 +467,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     async connect(): Promise<void> {
         this.pinEnabled = (await this.sessionSlot.protection()) === 'pin';
         this.locked = await this.sessionSlot.isLocked();
+        if (this.locked && this.settings.pinLockAfterMinutes > 0) {
+            // Unlocked within the time limit before Obsidian last closed.
+            const remembered = await this.rememberedUnlock.load();
+            if (remembered !== null && (await this.sessionSlot.unlockWithKey(remembered))) {
+                this.locked = false;
+                this.markActive();
+            }
+        }
         if (this.locked) {
             this.showStatus({ ...this.engine.getSummary(), status: 'locked' });
             if (!(await this.unlock())) {
@@ -746,10 +856,31 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.registerDomEvent(document, 'visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
                 this.engine.flushPendingEdits();
-            } else {
-                this.engine.pollNow();
+                // The OS may close the app from the background; save the
+                // expiry as it stands.
+                void this.rememberUnlock();
+                return;
             }
+            // Back from the background, perhaps after longer than the PIN's
+            // time limit: timers do not run there, so check now.
+            if (this.lockDue()) {
+                void this.lockNow();
+                return;
+            }
+            this.markActive();
+            this.engine.pollNow();
         });
+
+        // Using Obsidian restarts the PIN's clock.
+        this.registerDomEvent(document, 'pointerdown', () => this.onActivity());
+        this.registerDomEvent(document, 'keydown', () => this.onActivity());
+        this.registerInterval(
+            window.setInterval(() => {
+                if (this.lockDue()) {
+                    void this.lockNow();
+                }
+            }, LOCK_CHECK_MS),
+        );
         this.registerDomEvent(window, 'online', () => this.engine.pollNow());
 
         // Moving between Wi-Fi and mobile data, for the "Wi-Fi only" setting.

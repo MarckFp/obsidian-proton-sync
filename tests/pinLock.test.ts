@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { LockedError, PinProtectedSlot } from '../src/proton/pinLock';
+import { LockedError, PinProtectedSlot, RememberedUnlock } from '../src/proton/pinLock';
 import type { SecretSlot } from '../src/proton/secretStore';
 
 const SESSION = '{"uid":"u","accessToken":"a","refreshToken":"r","userKeyPassword":"k"}';
@@ -109,5 +109,51 @@ describe('PinProtectedSlot', () => {
         envelope.data = `A${envelope.data.slice(1)}`;
         inner.value = JSON.stringify(envelope);
         assert.equal(await protect(inner).unlock('482915'), false);
+    });
+});
+
+describe('remembering an unlock across restarts', () => {
+    it('reopens the session with the exported key, without the PIN', async () => {
+        const inner = memory(SESSION);
+        const slot = protect(inner);
+        await slot.setPin('482915');
+        const exported = slot.exportKey()!;
+        assert.ok(!exported.includes('482915'));
+
+        const restarted = protect(inner);
+        assert.equal(await restarted.unlockWithKey(exported), true);
+        assert.equal(await restarted.read(), SESSION);
+    });
+
+    it('refuses a key from before the PIN was changed', async () => {
+        const inner = memory(SESSION);
+        const slot = protect(inner);
+        await slot.setPin('482915');
+        const old = slot.exportKey()!;
+        await slot.setPin('another-pin');
+        assert.equal(await protect(inner).unlockWithKey(old), false);
+    });
+
+    it('locks again in memory without touching what is stored', async () => {
+        const inner = memory(SESSION);
+        const slot = protect(inner);
+        await slot.setPin('482915');
+        const stored = inner.value;
+        slot.lock();
+        await assert.rejects(slot.read(), LockedError);
+        assert.equal(slot.exportKey(), null);
+        assert.equal(inner.value, stored);
+    });
+
+    it('hands back a remembered key until it expires, then deletes it', async () => {
+        const clock = { now: 1000 };
+        const store = memory();
+        const remembered = new RememberedUnlock(store, () => clock.now);
+        await remembered.save('key', 2000);
+
+        assert.equal(await remembered.load(), 'key');
+        clock.now = 2001;
+        assert.equal(await remembered.load(), null);
+        assert.equal(store.value, null);
     });
 });

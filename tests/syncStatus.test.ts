@@ -52,3 +52,11 @@ describe('timeAgo', () => {
         assert.equal(timeAgo(now - 2 * 86_400_000, now), '2d ago');
     });
 });
+
+describe('the locked state', () => {
+    it('shows a lock even when conflicts are waiting', () => {
+        const summary = { ...base, status: 'locked' as const, conflicts: 3 };
+        assert.equal(statusIcon(summary), 'lock');
+        assert.equal(statusLabel(summary), 'Sync locked');
+    });
+});

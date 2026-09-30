@@ -178,6 +178,15 @@ export class ProtonSession {
     }
 
     /**
+     * Forget the session in memory, as when the PIN locks again. It stays
+     * stored, encrypted; unlocking and `init` bring it back.
+     */
+    lock(): void {
+        this.client = null;
+        this.credentials.unload();
+    }
+
+    /**
      * End the session with Proton, then forget it here.
      *
      * Revoked on Proton's side first, while the tokens needed to ask are still

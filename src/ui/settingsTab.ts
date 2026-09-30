@@ -35,6 +35,15 @@ const CONFLICT_POLICY_HELP: Record<ConflictPolicy, string> = {
     manual: 'Nothing is written until you choose. Conflicted files are skipped by the sync in the meantime.',
 };
 
+const PIN_LOCK_OPTIONS: Record<string, string> = {
+    '0': 'Every time Obsidian opens',
+    '1': 'After 1 minute away',
+    '5': 'After 5 minutes away',
+    '10': 'After 10 minutes away',
+    '30': 'After 30 minutes away',
+    '60': 'After 1 hour away',
+};
+
 const LOG_LEVELS: Record<LogLevel, string> = {
     debug: 'Debug (verbose)',
     info: 'Info',
@@ -73,10 +82,28 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
         if (key === 'excludePatterns') {
             return this.plugin.settings.excludePatterns.join('\n');
         }
+        if (key === 'uploadDebounceMs') {
+            // Seconds read better than milliseconds; the setting keeps
+            // milliseconds, so saved values carry over unchanged.
+            return this.plugin.settings.uploadDebounceMs / 1000;
+        }
+        if (key === 'pinLockAfterMinutes') {
+            // Dropdown values are strings.
+            return String(this.plugin.settings.pinLockAfterMinutes);
+        }
         return (this.plugin.settings as Record<string, unknown>)[key];
     }
 
     override async setControlValue(key: string, value: unknown): Promise<void> {
+        if (key === 'uploadDebounceMs') {
+            value = Math.round(Number(value) * 1000);
+        }
+        if (key === 'pinLockAfterMinutes') {
+            this.plugin.settings.pinLockAfterMinutes = Number(value);
+            await this.plugin.saveSettings();
+            await this.plugin.onPinLockAfterChanged();
+            return;
+        }
         if (key === 'paused') {
             await this.plugin.setPaused(Boolean(value));
             // Resuming can be declined at the first-sync preview, leaving the
@@ -187,6 +214,18 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                             );
                     },
                 },
+                {
+                    name: 'Ask for the PIN',
+                    desc:
+                        'After a time without using Obsidian, the PIN is asked for again and syncing waits until it is ' +
+                        'entered. With a time limit, reopening Obsidian within it does not ask either, which means the ' +
+                        'unlocked key is kept in Obsidian’s keychain until the limit runs out. Meanwhile anyone using ' +
+                        'this device could take your sign-in as if there were no PIN, and if Obsidian stays closed the key ' +
+                        'stays there until it next runs. "Every time Obsidian opens" never keeps it.',
+                    aliases: ['lock', 'timeout', 'auto-lock', 'idle'],
+                    visible: signedIn && !locked && this.plugin.pinEnabled,
+                    control: { type: 'dropdown', key: 'pinLockAfterMinutes', options: PIN_LOCK_OPTIONS },
+                },
             ],
         };
     }
@@ -257,14 +296,15 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                 },
                 {
                     name: 'Wait after an edit',
-                    desc: 'How long a file must be untouched before it is uploaded, in milliseconds.',
+                    desc: 'How long a file must be untouched before it is uploaded, in seconds. Fractions such as 0.5 work.',
                     aliases: ['debounce', 'delay'],
                     control: {
+                        // Shown in seconds, stored in milliseconds; see getControlValue.
                         type: 'number',
                         key: 'uploadDebounceMs',
                         min: 0,
                         validate: (value) =>
-                            Number.isFinite(value) && value >= 0 ? undefined : 'Enter zero or more milliseconds.',
+                            Number.isFinite(value) && value >= 0 ? undefined : 'Enter zero or more seconds.',
                     },
                 },
                 {

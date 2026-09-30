@@ -59,6 +59,13 @@ export type PluginSettings = {
 
     /** Set once the first-run setup has been shown, so it never reappears. */
     onboardingComplete: boolean;
+
+    /**
+     * With a PIN: minutes without using Obsidian before the PIN is asked for
+     * again. 0 asks only when Obsidian opens. With a time limit, reopening
+     * Obsidian within it does not ask either; see `RememberedUnlock`.
+     */
+    pinLockAfterMinutes: number;
 };
 
 /**
@@ -129,6 +136,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     logLevel: 'info',
 
     onboardingComplete: false,
+
+    pinLockAfterMinutes: 0,
 };
 
 /** Lower bound on the poll interval, to keep the account out of rate limiting. */
