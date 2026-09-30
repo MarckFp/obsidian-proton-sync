@@ -1,6 +1,5 @@
-import ky, { type AfterResponseHook, type KyInstance } from 'ky';
-
 import type { paths as AuthPaths } from './api-auth-types';
+import { createHttpClient, type HttpClient } from './http';
 import type { Logger } from './logger';
 import type { SessionCredentials } from './sessionCredentials';
 
@@ -15,21 +14,28 @@ export type ApiClientOptions = {
     credentials: SessionCredentials;
     logger: Logger;
     headers?: Record<string, string | undefined>;
-    afterResponseHooks?: AfterResponseHook[];
     /**
-     * Transport to use instead of the global `fetch`.
+     * The transport every request goes out through.
      *
      * LOCAL ADDITION (not upstream). Obsidian's renderer is subject to CORS and
      * Proton's API does not allow the plugin's origin, so requests have to go
-     * through Obsidian's `requestUrl`. See ../obsidianFetch.ts and VENDORED.md.
+     * through Obsidian's `requestUrl`. Required, so that no request can fall
+     * back to the renderer's own `fetch`. See ../obsidianFetch.ts and
+     * VENDORED.md.
      */
-    fetch?: typeof fetch;
+    fetch: typeof fetch;
 };
 
+/*
+ * LOCAL CHANGE (not upstream): built on ./http.ts instead of `ky`. The session
+ * headers are read per request rather than baked into a client rebuilt on
+ * every `sessionInfoChanged`, and a 401 is repeated at most once after a
+ * refresh, where the ky hook could keep refreshing and repeating. See
+ * VENDORED.md.
+ */
 export class ApiClient {
-    private authenticatedClientBase: KyInstance;
-    private authenticatedClient: KyInstance;
-    private unauthenticatedClient: KyInstance;
+    private readonly authenticatedClient: HttpClient;
+    private readonly unauthenticatedClient: HttpClient;
 
     private activeRefreshPromise: Promise<boolean> | null = null;
 
@@ -39,83 +45,45 @@ export class ApiClient {
         const baseUrl = options.baseUrl;
         this.baseUrlWithProtocol = baseUrl.match(/^https?:\/\//) ? baseUrl : `https://${baseUrl}`;
 
-        const requestHeaders = {
-            'x-pm-appversion': options.appVersion,
-            ...options.headers,
-        };
-        const baseClientOptions = {
-            headers: Object.fromEntries(
-                Object.entries(requestHeaders).filter((entry): entry is [string, string] => entry[1] !== undefined),
+        const baseHeaders = Object.fromEntries(
+            Object.entries({ 'x-pm-appversion': options.appVersion, ...options.headers }).filter(
+                (entry): entry is [string, string] => entry[1] !== undefined,
             ),
+        );
+
+        this.unauthenticatedClient = createHttpClient({
+            fetch: options.fetch,
             timeout: DEFAULT_TIMEOUT_MS,
-            // LOCAL ADDITION (not upstream), see ApiClientOptions.fetch.
-            ...(options.fetch !== undefined && { fetch: options.fetch }),
-        };
-        const afterResponseHooks = options.afterResponseHooks ?? [];
-        this.authenticatedClientBase = ky.create({
-            ...baseClientOptions,
-            hooks: {
-                afterResponse: [this.createRefreshSessionAfterResponseHook(), ...afterResponseHooks],
-            },
+            headers: () => baseHeaders,
         });
-        this.authenticatedClient = this.authenticatedClientBase;
-        this.unauthenticatedClient = ky.create({
-            ...baseClientOptions,
-            hooks: {
-                afterResponse: afterResponseHooks,
-            },
-        });
-        this.updateAuthenticatedClientHeaders();
-
-        options.credentials.on('sessionInfoChanged', () => this.updateAuthenticatedClientHeaders());
-    }
-
-    private updateAuthenticatedClientHeaders() {
-        this.authenticatedClient = this.authenticatedClientBase.extend({
-            headers: {
+        this.authenticatedClient = createHttpClient({
+            fetch: options.fetch,
+            timeout: DEFAULT_TIMEOUT_MS,
+            headers: () => ({
+                ...baseHeaders,
                 ...(this.options.credentials.uid && { 'x-pm-uid': this.options.credentials.uid }),
                 ...(this.options.credentials.accessToken && {
                     Authorization: `Bearer ${this.options.credentials.accessToken}`,
                 }),
+            }),
+            shouldResend: async (request, response) => {
+                if (response.status !== 401 || shouldSkipAuthRefreshForUrl(request.url)) {
+                    return false;
+                }
+                this.options.logger.info('Refreshing session');
+                const rejectedAccessToken = getAccessTokenFromHeaders(request.headers);
+                const refreshed = await this.refreshSessionIfPossible(rejectedAccessToken);
+                return refreshed && Boolean(this.options.credentials.uid && this.options.credentials.accessToken);
             },
         });
     }
 
-    get authenticatedRequest(): KyInstance {
+    get authenticatedRequest(): HttpClient {
         return this.authenticatedClient;
     }
 
-    get unauthenticatedRequest(): KyInstance {
+    get unauthenticatedRequest(): HttpClient {
         return this.unauthenticatedClient;
-    }
-
-    private createRefreshSessionAfterResponseHook(): AfterResponseHook {
-        return async (request, options, response) => {
-            if (response.status !== 401 || shouldSkipAuthRefreshForUrl(request.url)) {
-                return;
-            }
-
-            this.options.logger.info('Refreshing session');
-
-            const rejectedAccessToken = getAccessTokenFromHeaders(options.headers);
-            const refreshed = await this.refreshSessionIfPossible(rejectedAccessToken);
-            if (!refreshed) {
-                return;
-            }
-
-            const uid = this.options.credentials.uid;
-            const accessToken = this.options.credentials.accessToken;
-            if (!uid || !accessToken) {
-                return;
-            }
-
-            const headers = new Headers(options.headers);
-            headers.set('x-pm-appversion', this.options.appVersion);
-            headers.set('x-pm-uid', uid);
-            headers.set('Authorization', `Bearer ${accessToken}`);
-
-            return this.authenticatedClient(request, { ...options, headers });
-        };
     }
 
     async refreshSessionIfPossible(rejectedAccessToken?: string): Promise<boolean> {

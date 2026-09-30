@@ -30,13 +30,4 @@ export default defineConfig([
             ],
         },
     },
-    {
-        // Vendored from Proton's SDK repository, which uses `ky`. Every
-        // request it makes still goes through Obsidian's `requestUrl`, via the
-        // `fetch` option it is given; see src/proton/account/VENDORED.md.
-        files: ['src/proton/account/**/*.ts'],
-        rules: {
-            '@typescript-eslint/no-restricted-imports': 'off',
-        },
-    },
 ]);

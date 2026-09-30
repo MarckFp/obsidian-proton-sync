@@ -16,7 +16,9 @@ import type { ApiClient } from './account';
  * an account one, or the plugin drops offline until it is reloaded.
  *
  * `throwHttpErrors: false` is required: the SDK reads status codes off the
- * `Response` itself and maps them to its own error types.
+ * `Response` itself and maps them to its own error types. `retry: false`
+ * leaves retrying to the SDK, which already handles 429s, 5xx responses,
+ * timeouts and network errors; retrying here as well would multiply them.
  */
 export class HTTPClient implements ProtonDriveHTTPClient {
     constructor(private readonly apiClient: ApiClient) {}
@@ -30,6 +32,7 @@ export class HTTPClient implements ProtonDriveHTTPClient {
             timeout: options.timeoutMs,
             signal: options.signal,
             throwHttpErrors: false,
+            retry: false,
         });
     }
 
@@ -41,6 +44,7 @@ export class HTTPClient implements ProtonDriveHTTPClient {
             timeout: options.timeoutMs,
             signal: options.signal,
             throwHttpErrors: false,
+            retry: false,
         });
     }
 }

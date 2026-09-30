@@ -1,4 +1,4 @@
-import { HTTPError } from 'ky';
+import { HTTPError } from './http';
 
 import type { paths as AuthPaths } from './api-auth-types';
 import type { paths as CorePaths } from './api-core-types';
