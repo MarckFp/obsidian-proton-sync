@@ -6,6 +6,7 @@ import './polyfills';
 import { apiVersion, type App, Notice, Platform, Plugin, setIcon, setTooltip, TAbstractFile, TFile, TFolder } from 'obsidian';
 
 import { Credentials } from './proton/credentials';
+import { PinProtectedSlot } from './proton/pinLock';
 import { ConflictHistory } from './sync/conflictHistory';
 import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
 import { ProtonSession } from './proton/session';
@@ -17,6 +18,7 @@ import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor } from
 import { showConflictNotice } from './ui/conflictNotice';
 import { ConflictsModal } from './ui/conflictsModal';
 import { FirstSyncModal } from './ui/firstSyncModal';
+import { PinFormModal, UnlockModal } from './ui/pinModals';
 import { ReloadModal } from './ui/reloadModal';
 import { CONFLICT_POLICIES, ProtonDriveSyncSettingsTab } from './ui/settingsTab';
 import { SetupModal } from './ui/setupModal';
@@ -58,6 +60,15 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     session!: ProtonSession;
     state!: SyncState;
     conflictHistory!: ConflictHistory;
+    /** Where the Proton session is kept, encrypted with the user's PIN if they set one. */
+    sessionSlot!: PinProtectedSlot;
+    /** The stored session is PIN-protected and has not been unlocked in this run. */
+    locked = false;
+    /** Whether a PIN protects the stored session; cached for the settings tab, which renders synchronously. */
+    pinEnabled = false;
+    /** Wrong PINs entered so far in this run; see {@link UnlockModal}. */
+    private readonly pinFailures = { count: 0 };
+    private unlocking: Promise<boolean> | null = null;
     engine!: SyncEngine;
 
     private statusBar!: StatusBar;
@@ -100,8 +111,11 @@ export default class ProtonDriveSyncPlugin extends Plugin {
 
         const clientUid = this.installationId();
         const protonLogger = this.logger.getLogger('proton');
-        const credentials = new Credentials(
+        this.sessionSlot = new PinProtectedSlot(
             new ObsidianSecretSlot(this.app.secretStorage, `proton-drive-sync-session-${clientUid}`),
+        );
+        const credentials = new Credentials(
+            this.sessionSlot,
             {
                 adapter: this.app.vault.adapter,
                 path: this.pluginFile(LEGACY_SESSION_FILE),
@@ -230,6 +244,96 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         await this.engine.resume();
     }
 
+    // -- PIN ---------------------------------------------------------------
+
+    /**
+     * Ask for the PIN. Resolves true once the session is unlocked; false when
+     * the user closed the prompt, or chose to forget a lost PIN, which leaves
+     * them signed out.
+     */
+    private unlock(): Promise<boolean> {
+        this.unlocking ??= new Promise<boolean>((resolve) => {
+            new UnlockModal(this.app, {
+                verify: (pin) => this.sessionSlot.unlock(pin),
+                forget: () => this.sessionSlot.forget(),
+                failures: this.pinFailures,
+                onDone: (result) => {
+                    if (result === 'unlocked') {
+                        this.locked = false;
+                    } else if (result === 'forgotten') {
+                        this.locked = false;
+                        this.pinEnabled = false;
+                        this.showStatus({ ...this.engine.getSummary(), status: 'signed-out' });
+                        this.notify('the locked sign-in was deleted. Sign in again to keep syncing.');
+                    }
+                    resolve(result === 'unlocked');
+                },
+            }).open();
+        }).finally(() => {
+            this.unlocking = null;
+        });
+        return this.unlocking;
+    }
+
+    /** Set up, change or remove the PIN, after asking for the current one where there is one. */
+    managePin(mode: 'set' | 'change' | 'remove', onDone?: () => void): void {
+        new PinFormModal(this.app, {
+            mode,
+            verify: (pin) => this.sessionSlot.verify(pin),
+            apply: async (newPin) => {
+                if (mode === 'remove') {
+                    await this.sessionSlot.removePin();
+                } else if (newPin !== null) {
+                    await this.sessionSlot.setPin(newPin);
+                }
+                this.pinEnabled = mode !== 'remove';
+                this.notify(
+                    mode === 'set'
+                        ? 'PIN set. Obsidian will ask for it when it starts.'
+                        : mode === 'change'
+                          ? 'PIN changed.'
+                          : 'PIN removed.',
+                );
+            },
+            onDone: () => onDone?.(),
+        }).open();
+    }
+
+    /** Resolve true once the user has entered the right PIN, or straight away when there is none. */
+    private confirmPin(purpose: string): Promise<boolean> {
+        if (!this.pinEnabled) {
+            return Promise.resolve(true);
+        }
+        return new Promise((resolve) => {
+            new PinFormModal(this.app, {
+                mode: 'confirm',
+                purpose,
+                verify: (pin) => this.sessionSlot.verify(pin),
+                apply: async () => undefined,
+                onDone: resolve,
+            }).open();
+        });
+    }
+
+    /**
+     * Sign out: with the PIN first when there is one, then ending the session
+     * on Proton's side before forgetting it here.
+     */
+    async signOut(): Promise<void> {
+        if (!(await this.confirmPin('sign out'))) {
+            return;
+        }
+        const { revoked } = await this.session.signOut();
+        this.pinEnabled = false;
+        this.notify(
+            revoked
+                ? 'signed out, and the session was ended on Proton.'
+                : 'signed out on this device, but Proton could not be reached to end the session. ' +
+                      'Revoke it under account.proton.me → Security → Sessions if you need it gone now.',
+        );
+        await this.reconnect();
+    }
+
     /** Everything this device logged recently, with enough context to go in a bug report. */
     async copyLog(): Promise<void> {
         const header = [
@@ -253,6 +357,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * the plugin becomes active without a reload.
      */
     async connect(): Promise<void> {
+        this.pinEnabled = (await this.sessionSlot.protection()) === 'pin';
+        this.locked = await this.sessionSlot.isLocked();
+        if (this.locked) {
+            this.showStatus({ ...this.engine.getSummary(), status: 'locked' });
+            if (!(await this.unlock())) {
+                return;
+            }
+        }
         try {
             await this.session.init();
         } catch (error) {
@@ -334,6 +446,10 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     private async syncNowOrSetUp(): Promise<void> {
+        if (this.locked) {
+            await this.connect();
+            return;
+        }
         if (!this.isConfigured()) {
             this.openSetup();
             return;
@@ -454,6 +570,21 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 }
                 if (!checking) {
                     compareConflictCopyOf(this.app, file);
+                }
+                return true;
+            },
+        });
+
+        this.addCommand({
+            id: 'unlock',
+            icon: 'lock-open',
+            name: 'Unlock with PIN',
+            checkCallback: (checking) => {
+                if (!this.locked) {
+                    return false;
+                }
+                if (!checking) {
+                    void this.connect();
                 }
                 return true;
             },

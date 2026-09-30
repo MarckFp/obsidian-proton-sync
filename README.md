@@ -328,6 +328,41 @@ first launch, and the file is deleted.
 The sync state in `sync-state.json` holds paths, node ids and content hashes. No
 file contents, and no key material.
 
+**Signing out ends the session on Proton's side** (`DELETE /auth/v4`) before
+the local copy is deleted, so a copy of it that anyone might have taken stops
+working too. If Proton cannot be reached, the local copy is deleted anyway and
+you are told to revoke the session under account.proton.me → Security →
+Sessions.
+
+### Protecting the sign-in with a PIN
+
+Obsidian's keychain is encrypted by the operating system, which protects it
+while the device is locked, but not from someone using it unlocked: Obsidian's
+own Keychain settings can reveal a stored secret. Without a PIN, that secret is
+a working Proton session, key password included.
+
+An optional **PIN** closes that gap. Set it up in the setup assistant or under
+**Settings → Proton Drive Sync → Account → PIN**. The session is then stored
+encrypted (AES-256-GCM, with a key derived from the PIN by PBKDF2-SHA256 at
+600,000 iterations), and Obsidian asks for the PIN when it starts; nothing syncs
+until it is entered. Changing or removing the PIN, and signing out, ask for it
+first. After a few wrong tries each further try waits, longer every time.
+
+- **The PIN is stored nowhere.** Forget it and it cannot be recovered: **Forgot
+  PIN** in the unlock prompt deletes the locked sign-in from the device, and you
+  sign in again and choose a new PIN. Your notes are not affected, since the PIN
+  only ever protected the sign-in. Revoke the old session in your Proton account
+  if you want it gone before it expires.
+- **Longer is stronger.** Someone who copies the encrypted secret can try PINs
+  on their own machine, where no waiting applies; the key derivation makes each
+  try slow, but a six-digit PIN is still a small space. Letters and numbers both
+  work.
+- **What it does not cover.** Your notes are ordinary files on the device, and
+  once the PIN is entered the session is in memory until Obsidian closes. The
+  PIN protects your Proton account, and everything else in your Drive, from
+  someone who gets at the device while Obsidian is closed or not yet unlocked.
+- Signing out also removes the PIN; the next sign-in can set a new one.
+
 ## Permissions and disclosures
 
 Obsidian's plugin review flags some of what this plugin does. Here is each one

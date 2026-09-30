@@ -2,11 +2,14 @@ import { Platform, type SecretStorage } from 'obsidian';
 
 import type { Logger } from '../util/logger';
 
-/** One secret value, read and written whole. */
+/**
+ * One secret value, read and written whole. Asynchronous so that a slot can
+ * encrypt what it stores; see `PinProtectedSlot`.
+ */
 export interface SecretSlot {
-    read(): string | null;
+    read(): Promise<string | null>;
     /** `null` clears the secret. */
-    write(value: string | null): void;
+    write(value: string | null): Promise<void>;
 }
 
 /**
@@ -26,12 +29,12 @@ export class ObsidianSecretSlot implements SecretSlot {
         private readonly id: string,
     ) {}
 
-    read(): string | null {
+    async read(): Promise<string | null> {
         // Cleared secrets read back as an empty string.
         return this.storage.getSecret(this.id) || null;
     }
 
-    write(value: string | null): void {
+    async write(value: string | null): Promise<void> {
         this.storage.setSecret(this.id, value ?? '');
     }
 }

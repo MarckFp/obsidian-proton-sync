@@ -33,6 +33,11 @@ const PRESENTATION: Record<SyncStatus, Presentation> = {
         label: 'Paused',
         description: 'Paused. Anything changed in the meantime is synced when you resume.',
     },
+    locked: {
+        icon: 'lock',
+        label: 'Locked',
+        description: 'Your sign-in is protected with a PIN. Enter it to start syncing.',
+    },
     'waiting-for-wifi': {
         icon: 'wifi-off',
         label: 'Waiting for Wi-Fi',

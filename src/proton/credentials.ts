@@ -73,7 +73,7 @@ export class Credentials implements SessionCredentials {
 
     async load(): Promise<void> {
         this.session = null;
-        let stored = this.slot.read();
+        let stored = await this.slot.read();
         if (stored === null) {
             stored = await this.migrateLegacyFile();
         }
@@ -133,14 +133,14 @@ export class Credentials implements SessionCredentials {
 
     async signOut(): Promise<void> {
         this.session = null;
-        this.slot.write(null);
+        await this.slot.write(null);
         await this.removeLegacyFile();
         this.emitChanged();
     }
 
     private async persist(): Promise<void> {
         if (this.session) {
-            this.slot.write(JSON.stringify(this.session));
+            await this.slot.write(JSON.stringify(this.session));
             // A new session supersedes one an older version left behind.
             await this.removeLegacyFile();
         }
@@ -180,7 +180,7 @@ export class Credentials implements SessionCredentials {
             this.logger.warn('Could not decrypt the session saved by an older version; will try again next launch');
             return null;
         }
-        this.slot.write(decrypted);
+        await this.slot.write(decrypted);
         await this.removeLegacyFile();
         this.logger.info('Moved the stored Proton session into Obsidian’s secret storage');
         return decrypted;

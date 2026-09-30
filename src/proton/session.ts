@@ -6,6 +6,7 @@ import type { Logger } from '../util/logger';
 import { ApiClient, initAccount, type Addresses, type Auth, type Srp } from './account';
 import type { Credentials } from './credentials';
 import { HTTPClient } from './httpClient';
+import { revokeSession } from './revoke';
 import { obsidianFetch } from './obsidianFetch';
 import { Telemetry } from './telemetry';
 
@@ -176,16 +177,29 @@ export class ProtonSession {
         return { url: signInUrl, completion };
     }
 
-    async signOut(): Promise<void> {
-        try {
-            await this.auth?.logout();
-        } catch (error) {
-            // A failed server-side revocation must not leave the local session
-            // in place; the local credentials are cleared either way.
-            this.logger.warn('Failed to revoke the session with Proton', error);
-            await this.credentials.signOut();
-        }
+    /**
+     * End the session with Proton, then forget it here.
+     *
+     * Revoked on Proton's side first, while the tokens needed to ask are still
+     * at hand: deleting only the local copy would leave a session that anyone
+     * who had copied it could keep using, and keep refreshing, until it
+     * expired. The local copy is deleted whatever Proton answers, so a device
+     * that is offline, or a session Proton had already ended, still signs out;
+     * the session then stays listed under Account → Security → Sessions until
+     * it expires or is revoked there.
+     */
+    async signOut(): Promise<{ revoked: boolean }> {
+        const revoked = await this.revoke();
+        await this.credentials.signOut();
         this.client = null;
+        return { revoked };
+    }
+
+    private async revoke(): Promise<boolean> {
+        if (!this.apiClient || !this.credentials.uid || !this.credentials.accessToken) {
+            return false;
+        }
+        return revokeSession(this.apiClient, this.logger);
     }
 
     private buildClient(cryptoModule: OpenPGPCryptoWithCryptoProxy): void {

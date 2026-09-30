@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { ApiClient } from '../src/proton/account/apiClient';
 import { createHttpClient, HTTPError } from '../src/proton/account/http';
+import { revokeSession } from '../src/proton/revoke';
 import type { SessionCredentials, SessionInfo } from '../src/proton/account/sessionCredentials';
 import { Logger } from '../src/util/logger';
 
@@ -208,5 +209,36 @@ describe('ApiClient session refresh', () => {
 
         await assert.rejects(api.authenticatedRequest.get(`${api.baseUrlWithProtocol}/core/v4/users`).json(), HTTPError);
         assert.equal(credentials.signedOut, true);
+    });
+});
+
+describe('revokeSession', () => {
+    function api(reply: (request: Sent) => Reply) {
+        const transport = scriptedFetch(reply);
+        const client = new ApiClient({
+            baseUrl: 'api.test',
+            appVersion: 'test',
+            credentials: new FakeCredentials(),
+            logger: new Logger('error'),
+            fetch: transport.fetch,
+        });
+        return { client, sent: transport.sent };
+    }
+
+    it('ends the session on Proton with DELETE /auth/v4, sending the session headers', async () => {
+        const { client, sent } = api(() => json({ Code: 1000 }));
+        assert.equal(await revokeSession(client, new Logger('error')), true);
+        assert.equal(sent[0].method, 'DELETE');
+        assert.equal(sent[0].url, 'https://api.test/auth/v4');
+        assert.equal(sent[0].headers.get('authorization'), 'Bearer old');
+        assert.equal(sent[0].headers.get('x-pm-uid'), 'uid-1');
+    });
+
+    it('reports failure without throwing, so sign-out can still finish locally', async () => {
+        assert.equal(await revokeSession(api(() => json({}, 500)).client, new Logger('error')), false);
+        assert.equal(
+            await revokeSession(api(() => new TypeError('Failed to fetch')).client, new Logger('error')),
+            false,
+        );
     });
 });

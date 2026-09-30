@@ -112,6 +112,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
 
     private accountGroup(): SettingDefinitionItem {
         const signedIn = this.plugin.session.isSignedIn();
+        const locked = this.plugin.locked;
         const email = this.plugin.session.accountEmail;
 
         return {
@@ -120,16 +121,27 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
             items: [
                 {
                     name: 'Proton account',
-                    desc: signedIn
-                        ? `Signed in as ${email ?? 'your Proton account'}.`
-                        : 'Sign in through Proton in your browser. This plugin never sees your password.',
+                    desc: locked
+                        ? 'Signed in, and locked with your PIN. Unlock to start syncing.'
+                        : signedIn
+                          ? `Signed in as ${email ?? 'your Proton account'}.`
+                          : 'Sign in through Proton in your browser. This plugin never sees your password.',
                     aliases: ['sign in', 'sign out', 'login', 'logout'],
                     render: (setting) => {
                         setting.addButton((button) => {
+                            if (locked) {
+                                button
+                                    .setButtonText('Unlock')
+                                    .setCta()
+                                    .onClick(async () => {
+                                        await this.plugin.connect();
+                                        this.update();
+                                    });
+                                return;
+                            }
                             if (signedIn) {
                                 button.setButtonText('Sign out').onClick(async () => {
-                                    await this.plugin.session.signOut();
-                                    await this.plugin.reconnect();
+                                    await this.plugin.signOut();
                                     this.update();
                                 });
                                 return;
@@ -143,6 +155,36 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                                     }).open();
                                 });
                         });
+                    },
+                },
+                {
+                    name: 'PIN',
+                    desc: this.plugin.pinEnabled
+                        ? 'Set. Obsidian asks for it when it starts, and your Proton sign-in is stored encrypted with it.'
+                        : 'Not set. Anyone using this device while it is unlocked could copy your Proton sign-in ' +
+                          'from Obsidian’s keychain. A PIN stores it encrypted, and is asked for when Obsidian starts.',
+                    aliases: ['lock', 'password', 'security', 'passcode'],
+                    visible: signedIn && !locked,
+                    render: (setting) => {
+                        const refresh = () => this.update();
+                        if (!this.plugin.pinEnabled) {
+                            setting.addButton((button) =>
+                                button
+                                    .setButtonText('Set up PIN')
+                                    .onClick(() => this.plugin.managePin('set', refresh)),
+                            );
+                            return;
+                        }
+                        setting
+                            .addButton((button) =>
+                                button.setButtonText('Change').onClick(() => this.plugin.managePin('change', refresh)),
+                            )
+                            .addButton((button) =>
+                                button
+                                    .setButtonText('Remove')
+                                    .setDestructive()
+                                    .onClick(() => this.plugin.managePin('remove', refresh)),
+                            );
                     },
                 },
             ],

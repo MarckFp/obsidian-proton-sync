@@ -72,7 +72,11 @@ export class StatusBar {
             [
                 `Proton Drive Sync: ${statusDescription(summary)}`,
                 ...statusDetails(summary),
-                summary.status === 'paused' ? 'Click to resume.' : 'Click to sync now.',
+                summary.status === 'paused'
+                    ? 'Click to resume.'
+                    : summary.status === 'locked'
+                      ? 'Click to unlock.'
+                      : 'Click to sync now.',
                 'Right-click for more options.',
             ].join('\n'),
         );

@@ -283,3 +283,20 @@ button.proton-drive-sync-diff-action.mod-added {
 button.proton-drive-sync-diff-action.mod-added:hover {
     background-color: rgba(var(--color-green-rgb), 0.28);
 }
+
+/* PIN prompts */
+
+.proton-drive-sync-pin-error {
+    min-height: 1.5em;
+    margin: 0;
+    color: var(--text-error);
+    font-size: var(--font-ui-small);
+}
+
+.proton-drive-sync-pin-warning {
+    padding: var(--size-4-2) var(--size-4-3);
+    border-inline-start: 3px solid var(--color-orange);
+    border-radius: var(--radius-s);
+    background-color: rgba(var(--color-orange-rgb), 0.1);
+    font-size: var(--font-ui-small);
+}

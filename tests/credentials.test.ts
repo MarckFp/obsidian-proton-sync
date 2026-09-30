@@ -11,7 +11,11 @@ const SILENT = new Logger('error');
 const LEGACY = '.obsidian/plugins/proton-drive-sync/session.json';
 
 function memorySlot(initial: string | null = null) {
-    const slot = { value: initial, read: () => slot.value, write: (value: string | null) => void (slot.value = value) };
+    const slot = {
+        value: initial,
+        read: async () => slot.value,
+        write: async (value: string | null) => void (slot.value = value),
+    };
     return slot satisfies SecretSlot;
 }
 
@@ -120,7 +124,7 @@ describe('Credentials', () => {
 });
 
 describe('ObsidianSecretSlot', () => {
-    it('reads a cleared secret as absent', () => {
+    it('reads a cleared secret as absent', async () => {
         const secrets = new Map<string, string>();
         const storage = {
             getSecret: (id: string) => secrets.get(id) ?? null,
@@ -128,10 +132,10 @@ describe('ObsidianSecretSlot', () => {
         } as unknown as SecretStorage;
         const slot = new ObsidianSecretSlot(storage, 'proton-drive-sync-session-x');
 
-        assert.equal(slot.read(), null);
-        slot.write('secret');
-        assert.equal(slot.read(), 'secret');
-        slot.write(null);
-        assert.equal(slot.read(), null);
+        assert.equal(await slot.read(), null);
+        await slot.write('secret');
+        assert.equal(await slot.read(), 'secret');
+        await slot.write(null);
+        assert.equal(await slot.read(), null);
     });
 });

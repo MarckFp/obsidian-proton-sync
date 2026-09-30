@@ -5,7 +5,8 @@ import { FolderPickerModal } from './folderPickerModal';
 import { SignInModal } from './signInModal';
 
 /**
- * First-run setup: sign in, pick the Drive folder, choose what to sync, start.
+ * First-run setup: sign in, pick the Drive folder, choose what to sync,
+ * optionally set a PIN, start.
  *
  * Opens by itself the first time the plugin loads, so a new install does not
  * have to discover three separate settings in the right order before anything
@@ -108,6 +109,23 @@ export class SetupModal extends Modal {
                     await this.plugin.saveSettings();
                 }),
             );
+
+        if (signedIn) {
+            new Setting(contentEl)
+                .setName('Optional: protect your sign-in with a PIN')
+                .setDesc(
+                    this.plugin.pinEnabled
+                        ? 'PIN set. Obsidian will ask for it when it starts.'
+                        : 'Obsidian then asks for the PIN when it starts, so nobody using this device can take your ' +
+                              'Proton sign-in without it. You can set one up, or change it, later in the settings.',
+                )
+                .addButton((button) =>
+                    button
+                        .setButtonText(this.plugin.pinEnabled ? 'PIN set' : 'Set up PIN')
+                        .setDisabled(this.plugin.pinEnabled)
+                        .onClick(() => this.plugin.managePin('set', () => this.render())),
+                );
+        }
 
         new Setting(contentEl)
             .addButton((button) =>
