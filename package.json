@@ -1,6 +1,6 @@
 {
     "name": "obsidian-proton-drive-sync",
-    "version": "0.5.2",
+    "version": "0.6.0",
     "description": "Bidirectional sync between an Obsidian vault and Proton Drive, built on the official Proton Drive SDK.",
     "main": "main.js",
     "private": true,
