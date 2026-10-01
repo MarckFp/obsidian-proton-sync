@@ -132,6 +132,11 @@ export function statusDetails(summary: SyncSummary): string[] {
     }
     if (summary.progress) {
         lines.push(`${summary.progress.done} of ${summary.progress.total} files checked in this pass`);
+    } else if (summary.status === 'syncing' && !summary.transfer) {
+        lines.push('Looking for changes here and on Drive…');
+    }
+    if (summary.status === 'syncing' && summary.progressFraction !== null) {
+        lines.push(`${Math.floor(summary.progressFraction * 100)}% done`);
     }
     if (summary.pending > 0) {
         lines.push(`${summary.pending} change${summary.pending === 1 ? '' : 's'} not synced yet`);

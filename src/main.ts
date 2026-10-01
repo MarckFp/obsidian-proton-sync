@@ -26,7 +26,7 @@ import { DEFAULT_SETTINGS, type PluginSettings } from './settings';
 import { SyncEngine, type ConflictEvent, type OpenEditor, type SyncPlan, type SyncSummary } from './sync/engine';
 import { SyncState } from './sync/state';
 import { formatLogEntries, Logger } from './util/logger';
-import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor } from './ui/compare';
+import { compareConflictCopyOf, compareWithConflictCopy, compareWithVersion, conflictPairsFor } from './ui/compare';
 import { showConflictNotice } from './ui/conflictNotice';
 import { ConflictsModal } from './ui/conflictsModal';
 import { FirstSyncModal } from './ui/firstSyncModal';
@@ -122,8 +122,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             (leaf) =>
                 new SyncPanelView(leaf, {
                     summary: () => this.summary,
-                    logEntries: () => this.logger.getEntries(),
                     pendingChanges: () => this.engine.pendingChanges(),
+                    activeNote: () => this.app.workspace.getActiveFile()?.path ?? null,
+                    canListVersions: () => this.isConfigured() && !this.locked,
+                    versionsKey: (path) => this.engine.versionsKey(path),
+                    noteVersions: (path) => this.engine.noteVersions(path),
+                    openVersion: (path, version) => compareWithVersion(this, path, version),
                     openFile: (path) => void this.app.workspace.openLinkText(path, '', false),
                     syncNow: () => void this.syncNowOrSetUp(),
                     togglePause: () => void this.setPaused(!this.settings.paused),
@@ -861,6 +865,11 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         const shown = this.isConfigured() && !this.locked;
         const active = this.app.workspace.getActiveFile();
         this.statusBar.setNote(shown && active ? this.indicatorFor(active) : null);
+        for (const leaf of this.app.workspace.getLeavesOfType(SYNC_PANEL_VIEW)) {
+            if (leaf.view instanceof SyncPanelView) {
+                leaf.view.noteChanged();
+            }
+        }
 
         if (!Platform.isMobile) {
             return;
@@ -926,6 +935,32 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             }
         }
         return null;
+    }
+
+    /**
+     * Bring back an earlier version of a note: write it into the note, so the
+     * sync uploads it as a new version and every safeguard of an ordinary edit
+     * applies. Through the editor when the note is open, so the cursor stays
+     * and nothing typed meanwhile is written over; else through the vault.
+     */
+    async restoreVersion(path: string, data: ArrayBuffer): Promise<void> {
+        const file = this.app.vault.getFileByPath(path);
+        if (!file) {
+            throw new Error('the note no longer exists');
+        }
+        const editor = this.openEditor(path);
+        if (editor) {
+            editor.replace(new TextDecoder().decode(data));
+            return;
+        }
+        await this.app.vault.modifyBinary(file, data);
+    }
+
+    /** Whether a note has changes that have not reached Drive yet. */
+    hasUnsyncedChanges(path: string): boolean {
+        const file = this.app.vault.getFileByPath(path);
+        const stat = file ? { size: file.stat.size, mtime: file.stat.mtime } : null;
+        return this.engine.noteSyncState(path, stat) === 'pending';
     }
 
     private indicatorFor(file: TFile): NoteIndicator {

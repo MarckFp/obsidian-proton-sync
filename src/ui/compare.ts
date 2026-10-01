@@ -1,7 +1,8 @@
-import { type App, Notice, SuggestModal, TFile } from 'obsidian';
+import { type App, Modal, Notice, Setting, SuggestModal, TFile } from 'obsidian';
 
 import type ProtonDriveSyncPlugin from '../main';
 import { MAX_MERGE_BYTES } from '../sync/conflicts';
+import type { NoteVersion } from '../sync/engine';
 import { isTextPath } from '../sync/media';
 import { basename, conflictCopyOriginal, parentPath } from '../sync/paths';
 import { DiffModal } from './diffModal';
@@ -135,6 +136,101 @@ class ConflictCopyPicker extends SuggestModal<{ original: string; copy: string }
 
     override onChooseSuggestion(pair: { original: string; copy: string }): void {
         compareWithConflictCopy(this.app, pair.original, pair.copy);
+    }
+}
+
+/**
+ * Show a note against one of its earlier versions on Drive, with the choice
+ * to bring that version back. Lines only in the note as it is now are red
+ * with `-`, lines only in the earlier version green with `+`, so the green
+ * "Restore" button keeps the green side, as in every other comparison here.
+ *
+ * Restoring writes that version into the note, and the sync uploads it as a
+ * new version: the one it replaces stays in Drive's history, so a restore can
+ * itself be undone from the same list.
+ */
+export function compareWithVersion(plugin: ProtonDriveSyncPlugin, path: string, version: NoteVersion): void {
+    const when = new Date(version.created).toLocaleString();
+    const restore = async (data: ArrayBuffer) => {
+        await plugin.restoreVersion(path, data);
+        new Notice(`Restored the version of "${basename(path)}" from ${when}. It syncs as a new version.`);
+    };
+    const unsynced = plugin.hasUnsyncedChanges(path)
+        ? 'This note has changes that are not on Drive yet. Restoring replaces them, and they are not in the history.'
+        : undefined;
+
+    if (!isTextPath(path) || (version.size ?? 0) > MAX_MERGE_BYTES) {
+        new RestoreModal(plugin.app, basename(path), when, unsynced, async () =>
+            restore(await plugin.engine.readVersion(version.uid)),
+        ).open();
+        return;
+    }
+
+    let versionData: ArrayBuffer | null = null;
+    new DiffModal(plugin.app, {
+        title: `${basename(path)}: version from ${when}`,
+        oldLabel: 'This note now',
+        newLabel: `Version from ${when}`,
+        ...(unsynced !== undefined && { warning: unsynced }),
+        load: async () => {
+            versionData = await plugin.engine.readVersion(version.uid);
+            return { oldText: await readIfExists(plugin.app, path), newText: new TextDecoder().decode(versionData) };
+        },
+        actions: [
+            {
+                label: 'Restore this version',
+                keeps: 'added',
+                run: async () => {
+                    await restore(versionData ?? (await plugin.engine.readVersion(version.uid)));
+                },
+            },
+        ],
+    }).open();
+}
+
+/** Confirmation for restoring a version that cannot be shown as a diff, such as an image. */
+class RestoreModal extends Modal {
+    constructor(
+        app: App,
+        private readonly name: string,
+        private readonly when: string,
+        private readonly warning: string | undefined,
+        private readonly restore: () => Promise<void>,
+    ) {
+        super(app);
+    }
+
+    override onOpen(): void {
+        this.setTitle(`Restore ${this.name}?`);
+        this.contentEl.createEl('p', {
+            text:
+                `Replace "${this.name}" with its version from ${this.when}. The version it replaces stays in ` +
+                'Drive’s history, so this can be undone the same way.',
+        });
+        if (this.warning) {
+            this.contentEl.createEl('p', { cls: 'proton-drive-sync-pin-warning', text: this.warning });
+        }
+        new Setting(this.contentEl)
+            .addButton((button) => button.setButtonText('Cancel').onClick(() => this.close()))
+            .addButton((button) =>
+                button
+                    .setButtonText('Restore')
+                    .setCta()
+                    .onClick(async () => {
+                        button.setDisabled(true);
+                        try {
+                            await this.restore();
+                            this.close();
+                        } catch (error) {
+                            new Notice(`Could not restore: ${error instanceof Error ? error.message : String(error)}`);
+                            button.setDisabled(false);
+                        }
+                    }),
+            );
+    }
+
+    override onClose(): void {
+        this.contentEl.empty();
     }
 }
 

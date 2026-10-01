@@ -1,20 +1,21 @@
-import { ButtonComponent, ItemView, setIcon, type WorkspaceLeaf } from 'obsidian';
+import { ButtonComponent, ExtraButtonComponent, ItemView, setIcon, type WorkspaceLeaf } from 'obsidian';
 
-import type { PendingChange, SyncSummary } from '../sync/engine';
-import type { LogEntry } from '../util/logger';
+import type { NoteVersion, PendingChange, SyncSummary } from '../sync/engine';
+import { basename } from '../sync/paths';
 import {
+    formatBytes,
     PENDING_TEXT,
     statusDescription,
     statusDetails,
     statusIcon,
     statusLabel,
-    transferPercent,
+    timeAgo,
 } from './syncStatus';
 
 export const SYNC_PANEL_VIEW = 'proton-drive-sync-panel';
 
-/** Log entries shown in the panel, newest first. */
-const RECENT_ENTRIES = 20;
+/** Versions of the current note shown per page of its history. */
+const VERSIONS_PER_PAGE = 10;
 
 /** Entries of the "Not synced yet" list shown before the rest are counted. */
 const MAX_PENDING_SHOWN = 30;
@@ -23,8 +24,16 @@ const MAX_PENDING_SHOWN = 30;
 /** What the panel needs from the plugin; kept narrow so the view holds no plugin internals. */
 export type SyncPanelHost = {
     summary(): SyncSummary;
-    logEntries(): readonly LogEntry[];
     pendingChanges(): PendingChange[];
+    /** The note in view, or the one last in view while the sidebar has focus. */
+    activeNote(): string | null;
+    /** Whether Drive can be asked for versions now: signed in, a folder chosen, not locked. */
+    canListVersions(): boolean;
+    /** Changes when the note's history needs listing again; see `SyncEngine.versionsKey`. */
+    versionsKey(path: string): string;
+    noteVersions(path: string): Promise<NoteVersion[] | null>;
+    /** Compare the note with a version, and offer to restore it. */
+    openVersion(path: string, version: NoteVersion): void;
     /** Open a note, from the "Not synced yet" list. */
     openFile(path: string): void;
     syncNow(): void;
@@ -54,9 +63,16 @@ export class SyncPanelView extends ItemView {
     private syncButton!: ButtonComponent;
     private pauseButton!: ButtonComponent;
     private conflictsButton!: ButtonComponent;
-    private logEl!: HTMLElement;
     private pendingHeadingEl!: HTMLElement;
     private pendingEl!: HTMLElement;
+    private historyTitleEl!: HTMLElement;
+    private historyEl!: HTMLElement;
+
+    /** What the history list shows: for which listing, and its state. */
+    private historyKey: string | null = null;
+    private historyPath: string | null = null;
+    private versions: NoteVersion[] | null | 'loading' | Error = null;
+    private historyPage = 0;
 
     constructor(
         leaf: WorkspaceLeaf,
@@ -95,17 +111,26 @@ export class SyncPanelView extends ItemView {
         const actions = root.createDiv({ cls: 'proton-drive-sync-panel-actions' });
         this.syncButton = new ButtonComponent(actions).setCta().onClick(() => this.host.syncNow());
         this.pauseButton = new ButtonComponent(actions).onClick(() => this.host.togglePause());
-        this.conflictsButton = new ButtonComponent(actions).setIcon('alert-circle').onClick(() => this.host.showConflicts());
         new ButtonComponent(actions)
             .setIcon('settings')
             .setTooltip('Settings')
             .onClick(() => this.host.openSettings());
+        this.conflictsButton = new ButtonComponent(root).setIcon('alert-circle').onClick(() => this.host.showConflicts());
+        this.conflictsButton.buttonEl.addClass('proton-drive-sync-panel-wide');
 
         this.pendingHeadingEl = root.createEl('h6', { cls: 'proton-drive-sync-panel-heading' });
         this.pendingEl = root.createDiv({ cls: 'proton-drive-sync-panel-pending' });
 
-        root.createEl('h6', { text: 'Recent activity', cls: 'proton-drive-sync-panel-heading' });
-        this.logEl = root.createEl('pre', { cls: 'proton-drive-sync-log' });
+        const historyHeading = root.createDiv({ cls: 'proton-drive-sync-panel-heading proton-drive-sync-panel-history-heading' });
+        this.historyTitleEl = historyHeading.createEl('h6');
+        new ExtraButtonComponent(historyHeading)
+            .setIcon('refresh-cw')
+            .setTooltip('List the versions again')
+            .onClick(() => {
+                this.historyKey = null;
+                this.noteChanged();
+            });
+        this.historyEl = root.createDiv({ cls: 'proton-drive-sync-panel-history' });
 
         this.update(this.host.summary());
     }
@@ -121,13 +146,13 @@ export class SyncPanelView extends ItemView {
         this.labelEl.setText(statusLabel(summary));
         this.descriptionEl.setText(statusDescription(summary));
 
-        const fraction = summary.transfer
-            ? transferPercent(summary.transfer) / 100
-            : summary.progress && summary.progress.total > 0
-              ? summary.progress.done / summary.progress.total
-              : null;
-        this.progressEl.toggle(summary.status === 'syncing' && fraction !== null);
-        this.progressFillEl.setCssProps({ width: `${Math.round((fraction ?? 0) * 100)}%` });
+        // Shown for the whole of a sync: measured once there is something to
+        // measure against, and until then a moving bar that says work is under
+        // way, rather than nothing at all while Drive and the vault are listed.
+        const fraction = summary.progressFraction;
+        this.progressEl.toggle(summary.status === 'syncing');
+        this.progressEl.toggleClass('mod-indeterminate', fraction === null);
+        this.progressFillEl.setCssProps({ width: fraction === null ? '' : `${Math.round(fraction * 100)}%` });
 
         this.detailsEl.empty();
         for (const line of statusDetails(summary)) {
@@ -147,15 +172,122 @@ export class SyncPanelView extends ItemView {
         this.conflictsButton.buttonEl.toggleClass('mod-warning', summary.conflicts > 0);
 
         this.renderPending(this.host.pendingChanges(), summary);
+        this.noteChanged();
+    }
 
-        const entries = this.host.logEntries().slice(-RECENT_ENTRIES).reverse();
-        this.logEl.setText(
-            entries.length === 0
-                ? 'Nothing logged yet.'
-                : entries
-                      .map((entry) => `${new Date(entry.time).toLocaleTimeString()} ${entry.message}`)
-                      .join('\n'),
+    /**
+     * The note in view, or its synced version, may have changed: list its
+     * history again if so. Cheap when nothing changed, so it can run on every
+     * status update; Drive is only asked when the listing would differ.
+     */
+    noteChanged(): void {
+        if (!this.historyEl) {
+            return;
+        }
+        const path = this.host.activeNote();
+        const available = path !== null && this.host.canListVersions();
+        const key = available ? this.host.versionsKey(path) : `unavailable:${path ?? ''}`;
+        if (key === this.historyKey) {
+            return;
+        }
+        this.historyKey = key;
+        this.historyPath = path;
+        this.historyPage = 0;
+        if (!available) {
+            this.versions = null;
+            this.renderHistory();
+            return;
+        }
+        this.versions = 'loading';
+        this.renderHistory();
+        void this.host.noteVersions(path).then(
+            (versions) => this.showVersions(key, versions),
+            (error: unknown) => this.showVersions(key, error instanceof Error ? error : new Error(String(error))),
         );
+    }
+
+    private showVersions(key: string, versions: NoteVersion[] | null | Error): void {
+        // A slow answer for a note no longer in view is dropped.
+        if (key !== this.historyKey) {
+            return;
+        }
+        this.versions = versions;
+        this.renderHistory();
+    }
+
+    /**
+     * The current note's versions on Drive, newest first, a page at a time.
+     * Choosing one compares it with the note as it is now, and offers to bring
+     * it back.
+     */
+    private renderHistory(): void {
+        const path = this.historyPath;
+        this.historyTitleEl.setText(path ? `Versions of ${basename(path)}` : 'Versions');
+        this.historyEl.empty();
+        const say = (text: string) => this.historyEl.createDiv({ cls: 'proton-drive-sync-muted', text });
+
+        if (path === null) {
+            say('Open a note to see its versions on Proton Drive.');
+            return;
+        }
+        if (!this.host.canListVersions()) {
+            say('Sign in, choose a Drive folder and unlock to see this note’s versions.');
+            return;
+        }
+        if (this.versions === 'loading') {
+            say('Listing versions…');
+            return;
+        }
+        if (this.versions instanceof Error) {
+            say(`Could not list the versions: ${this.versions.message}`);
+            return;
+        }
+        if (this.versions === null) {
+            say('This note is not on Proton Drive yet, so it has no versions there.');
+            return;
+        }
+        if (this.versions.length === 0) {
+            say('No versions on Drive.');
+            return;
+        }
+
+        const versions = this.versions;
+        const pages = Math.ceil(versions.length / VERSIONS_PER_PAGE);
+        const page = Math.min(this.historyPage, pages - 1);
+        const list = this.historyEl.createDiv({ cls: 'proton-drive-sync-panel-versions' });
+        for (const version of versions.slice(page * VERSIONS_PER_PAGE, (page + 1) * VERSIONS_PER_PAGE)) {
+            const item = list.createEl('button', { cls: 'proton-drive-sync-panel-version' });
+            const top = item.createDiv({ cls: 'proton-drive-sync-panel-version-date' });
+            top.setText(new Date(version.created).toLocaleString());
+            if (version.active) {
+                top.createSpan({ cls: 'proton-drive-sync-panel-badge', text: 'Current' });
+            }
+            const details = [timeAgo(version.created)];
+            if (version.size !== undefined) {
+                details.push(formatBytes(version.size));
+            }
+            item.createDiv({ cls: 'proton-drive-sync-muted', text: details.join(' · ') });
+            item.addEventListener('click', () => this.host.openVersion(path, version));
+        }
+
+        if (pages > 1) {
+            const pager = this.historyEl.createDiv({ cls: 'proton-drive-sync-panel-pager' });
+            new ButtonComponent(pager)
+                .setButtonText('Newer')
+                .setDisabled(page === 0)
+                .onClick(() => {
+                    this.historyPage = page - 1;
+                    this.renderHistory();
+                });
+            pager.createSpan({ cls: 'proton-drive-sync-muted', text: `Page ${page + 1} of ${pages}` });
+            new ButtonComponent(pager)
+                .setButtonText('Older')
+                .setDisabled(page >= pages - 1)
+                .onClick(() => {
+                    this.historyPage = page + 1;
+                    this.renderHistory();
+                });
+        }
     }
 
     /**

@@ -536,7 +536,10 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                                 .setTooltip('Copy the full recent log, for a bug report')
                                 .onClick(() => void this.plugin.copyLog()),
                         );
-                        const log = setting.descEl.createEl('pre', { cls: 'proton-drive-sync-log' });
+                        // Stacked, with the log under the name and button, so it
+                        // has the card's full width on a narrow screen.
+                        setting.settingEl.addClass('proton-drive-sync-log-setting');
+                        const log = setting.settingEl.createEl('pre', { cls: 'proton-drive-sync-log' });
                         const entries = this.plugin.logger.getEntries().slice(-50);
                         log.setText(
                             entries.length === 0

@@ -14,6 +14,7 @@ const base: SyncSummary = {
     progress: null,
     transfer: null,
     pending: 0,
+    progressFraction: null,
 };
 
 describe('statusLabel', () => {

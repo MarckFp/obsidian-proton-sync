@@ -1,6 +1,7 @@
 import {
     DriveEventType,
     NodeType,
+    RevisionState,
     NodeWithSameNameExistsValidationError,
     type NodeEntity,
     type ProtonDriveClient,
@@ -62,7 +63,13 @@ export type SyncSummary = {
     downloaded: number;
     /** Paths not in sync right now, for whatever reason; see {@link SyncEngine.pendingChanges}. */
     pending: number;
-    /** Files handled so far in the current pass, when it covers more than one. */
+    /**
+     * How far the current pass is, from 0 to 1, or null when there is nothing
+     * to measure yet (listing Drive and the vault): the panel then shows a bar
+     * that only says work is under way.
+     */
+    progressFraction: number | null;
+    /** Files checked so far in the current pass, when it covers more than one. */
     progress: { done: number; total: number } | null;
     /** The largest transfer in flight, if any is large enough to report. */
     transfer: TransferProgress | null;
@@ -79,6 +86,19 @@ export type PendingReason =
     | 'conflict';
 
 export type PendingChange = { path: string; reason: PendingReason; detail?: string };
+
+/** One version of a note in Drive's revision history. */
+export type NoteVersion = {
+    uid: string;
+    /** When Drive received it, epoch ms. */
+    created: number;
+    size?: number;
+    /** The version Drive currently serves. */
+    active: boolean;
+};
+
+/** Versions of a note listed in the panel's history, at most. */
+const MAX_NOTE_VERSIONS = 50;
 
 /** One note's standing, for the current-note indicator. */
 export type NoteSyncState = 'synced' | 'pending' | 'excluded';
@@ -206,6 +226,9 @@ const SCAN_CONCURRENCY = 8;
 /** Transfers smaller than this finish too fast for progress to mean anything. */
 const PROGRESS_MIN_BYTES = 1024 * 1024;
 
+/** Share of the progress bar given to checking files; the rest is for the bytes transferred. */
+const CHECK_SHARE = 0.15;
+
 /** Progress updates are coalesced to at most one per this interval. */
 const CHANGE_THROTTLE_MS = 250;
 
@@ -309,7 +332,18 @@ export class SyncEngine {
     private paused = false;
     /** A full sync was asked for while the network was held; it runs once it is not. */
     private deferredFullSync = false;
-    private progress: { done: number; total: number } | null = null;
+    /**
+     * The current pass: files checked out of the total, and the transfers it
+     * found, weighed by their size, done out of queued; see {@link progressFraction}.
+     */
+    private progress: {
+        done: number;
+        total: number;
+        bytesQueued: number;
+        bytesDone: number;
+        /** Highest fraction reported in this pass, so the bar never moves back. */
+        shown: number;
+    } | null = null;
     private readonly transfers = new Map<symbol, TransferProgress>();
     private changeTimer: number | null = null;
     /** Paths with a transfer under way. */
@@ -413,7 +447,8 @@ export class SyncEngine {
             conflicts: this.state.conflicts().length,
             uploaded: this.uploaded,
             downloaded: this.downloaded,
-            progress: this.progress ? { ...this.progress } : null,
+            progress: this.progress ? { done: this.progress.done, total: this.progress.total } : null,
+            progressFraction: this.progressFraction(),
             transfer: this.largestTransfer(),
             pending: this.pendingChanges().length,
         };
@@ -1013,7 +1048,7 @@ export class SyncEngine {
 
         const transfers = new Limiter(() => this.transferLimit);
         const limit = this.sizeLimitBytes();
-        this.progress = ordered.length > 1 ? { done: 0, total: ordered.length } : null;
+        this.progress = ordered.length > 1 ? { done: 0, total: ordered.length, bytesQueued: 0, bytesDone: 0, shown: 0 } : null;
 
         // Deciding runs in parallel, but paths take their place in the
         // transfer queue strictly in `ordered` order: each waits for the one
@@ -1027,15 +1062,32 @@ export class SyncEngine {
             previousQueued = new Promise<void>((resolve) => (markQueued = resolve));
 
             return async () => {
+                let checked = false;
+                // Counted as checked once decided, not once transferred: most
+                // files need nothing, and counting them only at the end of a
+                // pass full of transfers would leave the bar idle and then jump.
+                const markChecked = () => {
+                    if (!checked && this.progress) {
+                        checked = true;
+                        this.progress.done++;
+                        this.emitChange();
+                    }
+                };
+                let weight = 0;
                 try {
                     if (this.state.isConflicted(path) && this.settings.conflictPolicy === 'manual') {
                         // Left for the user; acting now would undo a pending decision.
                         return;
                     }
                     let decision = await this.decide(path, remoteStates.get(path), limit);
+                    markChecked();
                     await turn;
                     if (!decision) {
                         return;
+                    }
+                    if (needsTransfer(decision.action) && this.progress) {
+                        weight = Math.max(1, transferSize(decision.action, decision.local, decision.remote));
+                        this.progress.bytesQueued += weight;
                     }
                     if (!needsTransfer(decision.action)) {
                         markQueued();
@@ -1085,8 +1137,9 @@ export class SyncEngine {
                     await transfer;
                 } finally {
                     markQueued();
-                    if (this.progress) {
-                        this.progress.done++;
+                    markChecked();
+                    if (weight > 0 && this.progress) {
+                        this.progress.bytesDone += weight;
                         this.emitChange();
                     }
                 }
@@ -3069,6 +3122,32 @@ export class SyncEngine {
         this.hooks.onConflict(event);
     }
 
+    /**
+     * How far the current pass is: a little for checking every file, most for
+     * the bytes it has to move, including what large transfers in flight have
+     * sent so far. Null between passes and while listing, when there is no
+     * total to measure against.
+     */
+    private progressFraction(): number | null {
+        const progress = this.progress;
+        if (!progress) {
+            const transfer = this.largestTransfer();
+            return transfer && transfer.total > 0 ? transfer.bytes / transfer.total : null;
+        }
+        const checks = progress.total > 0 ? progress.done / progress.total : 1;
+        let fraction = checks;
+        if (progress.bytesQueued > 0) {
+            let inFlight = 0;
+            for (const transfer of this.transfers.values()) {
+                inFlight += transfer.bytes;
+            }
+            const bytes = Math.min(1, (progress.bytesDone + inFlight) / progress.bytesQueued);
+            fraction = CHECK_SHARE * checks + (1 - CHECK_SHARE) * bytes;
+        }
+        progress.shown = Math.max(progress.shown, Math.min(1, fraction));
+        return progress.shown;
+    }
+
     /** Transfers allowed at once right now. */
     currentTransferLimit(): number {
         return this.transferLimit;
@@ -3214,6 +3293,45 @@ export class SyncEngine {
     }
 
     /**
+     * A note's versions in Drive's revision history, newest first, at most
+     * {@link MAX_NOTE_VERSIONS}. Null when the note is not on Drive yet.
+     */
+    async noteVersions(path: string): Promise<NoteVersion[] | null> {
+        const drive = this.drive;
+        if (!drive) {
+            throw new Error('Not connected to Proton Drive');
+        }
+        const record = this.state.get(path);
+        if (record?.type !== 'file') {
+            return null;
+        }
+        const revisions = await drive.listRevisions(record.nodeUid);
+        return revisions.slice(0, MAX_NOTE_VERSIONS).map((revision, index) => ({
+            uid: revision.uid,
+            created: revision.creationTime.getTime(),
+            ...(revision.claimedSize !== undefined && { size: revision.claimedSize }),
+            // Older clients' listings may not say which is active; the newest is.
+            active: revision.state === undefined ? index === 0 : revision.state === RevisionState.Active,
+        }));
+    }
+
+    /** The content of one version from {@link noteVersions}. */
+    async readVersion(revisionUid: string): Promise<ArrayBuffer> {
+        if (!this.drive) {
+            throw new Error('Not connected to Proton Drive');
+        }
+        return this.drive.downloadRevision(revisionUid);
+    }
+
+    /**
+     * Identifies what a note's history listing depends on: the note, and the
+     * revision its last sync recorded. When that changes, the listing is stale.
+     */
+    versionsKey(path: string): string {
+        return `${path}@${this.state.get(path)?.base?.remoteRevisionUid ?? ''}`;
+    }
+
+    /**
      * The Drive version of a file, for comparing it with the local one. Null
      * when there is no such file on Drive.
      */
@@ -3242,6 +3360,20 @@ export class SyncEngine {
 /** The settings that decide which paths take part; a change means a full sync. */
 function scopeKeyOf(settings: PluginSettings): string {
     return JSON.stringify([settings.syncObsidianConfig, settings.excludePatterns]);
+}
+
+/** Bytes an action moves, as far as known, to weigh it in the progress bar. */
+function transferSize(action: SyncAction, local: LocalState | undefined, remote: RemoteState | undefined): number {
+    switch (action.type) {
+        case 'upload':
+            return local?.size ?? 0;
+        case 'download':
+            return remote?.size ?? 0;
+        case 'conflict':
+            return Math.max(local?.size ?? 0, remote?.size ?? 0);
+        default:
+            return 0;
+    }
 }
 
 function needsTransfer(action: SyncAction): boolean {

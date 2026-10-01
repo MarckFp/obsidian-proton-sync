@@ -42,7 +42,20 @@
     background-color: var(--background-secondary);
     color: var(--text-muted);
     font-size: var(--font-ui-smaller);
-    white-space: pre;
+    /* Wrapped rather than scrolled sideways, and never wider than its card. */
+    max-width: 100%;
+    box-sizing: border-box;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.proton-drive-sync-log-setting {
+    flex-wrap: wrap;
+}
+
+.proton-drive-sync-log-setting > .proton-drive-sync-log {
+    flex: 1 1 100%;
+    margin: var(--size-4-2) 0 0;
 }
 
 /* Conflict notice */
@@ -347,6 +360,93 @@ button.proton-drive-sync-diff-action.mod-added:hover {
 @media (prefers-reduced-motion: reduce) {
     .proton-drive-sync-note-dot.mod-synced,
     .proton-drive-sync-note-dot.mod-pending {
+        animation: none;
+    }
+}
+
+/* Sync panel: the Conflicts button under the main actions, and the note's versions */
+
+.proton-drive-sync-panel-wide {
+    width: 100%;
+    margin-bottom: var(--size-4-3);
+}
+
+.proton-drive-sync-panel-history-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.proton-drive-sync-panel-history-heading h6 {
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.proton-drive-sync-panel-versions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-1);
+}
+
+button.proton-drive-sync-panel-version {
+    display: block;
+    width: 100%;
+    height: auto;
+    padding: var(--size-4-2) var(--size-4-3);
+    text-align: start;
+    white-space: normal;
+    box-shadow: none;
+    background-color: var(--background-secondary);
+}
+
+button.proton-drive-sync-panel-version:hover {
+    background-color: var(--background-modifier-hover);
+}
+
+.proton-drive-sync-panel-version-date {
+    font-size: var(--font-ui-small);
+    color: var(--text-normal);
+}
+
+.proton-drive-sync-panel-badge {
+    margin-inline-start: var(--size-4-2);
+    padding: 0 var(--size-4-1);
+    border-radius: var(--radius-s);
+    background-color: var(--interactive-accent);
+    color: var(--text-on-accent);
+    font-size: var(--font-ui-smaller);
+}
+
+.proton-drive-sync-panel-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--size-4-2);
+    margin-top: var(--size-4-2);
+}
+
+/* Before a pass has a total to measure against, the bar only says work is under way. */
+.proton-drive-sync-panel-progress.mod-indeterminate .proton-drive-sync-panel-progress-fill {
+    width: 30%;
+    transition: none;
+    animation: proton-drive-sync-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes proton-drive-sync-indeterminate {
+    0% {
+        transform: translateX(-100%);
+    }
+    100% {
+        transform: translateX(340%);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .proton-drive-sync-panel-progress.mod-indeterminate .proton-drive-sync-panel-progress-fill {
+        width: 100%;
+        opacity: 0.4;
         animation: none;
     }
 }

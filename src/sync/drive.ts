@@ -359,6 +359,15 @@ export class DriveIO {
         return start === -1 || end <= start ? [] : revisions.slice(start + 1, end);
     }
 
+    /** Every revision of a node, newest first, asked of Drive itself. */
+    async listRevisions(nodeUid: string): Promise<Revision[]> {
+        const revisions: Revision[] = [];
+        for await (const revision of this.client.iterateRevisions(nodeUid)) {
+            revisions.push(revision);
+        }
+        return revisions.sort((a, b) => b.creationTime.getTime() - a.creationTime.getTime());
+    }
+
     /**
      * The newest revision of a node, asked of Drive itself. Revision listings
      * are not served from the SDK's cache, so this sees an upload another

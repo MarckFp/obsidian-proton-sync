@@ -23,6 +23,8 @@ export type DiffModalOptions = {
     load: () => Promise<{ oldText: string; newText: string }>;
     /** Buttons under the diff; the modal closes after one has run. */
     actions?: DiffAction[];
+    /** A warning shown above the diff, such as changes an action would replace. */
+    warning?: string;
 };
 
 /**
@@ -86,6 +88,9 @@ export class DiffModal extends Modal {
             return;
         }
 
+        if (this.options.warning) {
+            contentEl.createEl('p', { cls: 'proton-drive-sync-pin-warning', text: this.options.warning });
+        }
         const header = contentEl.createDiv({ cls: 'proton-drive-sync-diff-header' });
         header.createSpan({ cls: 'proton-drive-sync-diff-legend mod-removed', text: `− ${this.options.oldLabel}` });
         header.createSpan({ cls: 'proton-drive-sync-diff-legend mod-added', text: `+ ${this.options.newLabel}` });

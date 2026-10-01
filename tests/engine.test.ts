@@ -1505,3 +1505,70 @@ describe('SyncEngine — bringing remote changes in through an open editor', () 
         assert.equal(copy && vault.read(copy), 'meet on Friday');
     });
 });
+
+describe('SyncEngine — a note’s versions on Drive', () => {
+    it('lists them newest first, marks the current one, and keeps at most 50', async () => {
+        const vault = new MemoryVault();
+        vault.write('note.md', 'v0');
+        const { drive, engine } = await setup({ vault });
+        for (let i = 1; i <= 55; i++) {
+            drive.put('note.md', `v${i}`);
+        }
+
+        const versions = (await engine.noteVersions('note.md'))!;
+        assert.equal(versions.length, 50);
+        assert.ok(versions[0].created >= versions[1].created);
+        assert.equal(versions[0].active, true);
+        assert.equal(versions.filter((version) => version.active).length, 1);
+        assert.equal(new TextDecoder().decode(await engine.readVersion(versions[0].uid)), 'v55');
+        assert.equal(new TextDecoder().decode(await engine.readVersion(versions[5].uid)), 'v50');
+    });
+
+    it('has none for a note not on Drive yet', async () => {
+        const { engine } = await setup();
+        assert.equal(await engine.noteVersions('never-synced.md'), null);
+    });
+
+    it('marks the listing stale once the note syncs a new version', async () => {
+        const vault = new MemoryVault();
+        vault.write('note.md', 'v1');
+        const { engine, settled } = await setup({ vault });
+        const before = engine.versionsKey('note.md');
+
+        vault.write('note.md', 'v2');
+        engine.onVaultChange('note.md');
+        await settled();
+        assert.notEqual(engine.versionsKey('note.md'), before);
+    });
+});
+
+describe('SyncEngine — progress while a sync runs', () => {
+    it('reports progress throughout the transfers, never going back, with checking done early', async () => {
+        const drive = new FakeDrive();
+        for (let i = 0; i < 10; i++) {
+            drive.put(`note-${i}.md`, `note number ${i}`);
+        }
+        const { engine, settled } = await setup({ drive, start: false, settings: { transferConcurrency: 1 } });
+        const samples: { fraction: number | null; done: number; total: number; status: string }[] = [];
+        drive.duringDownload = () => {
+            const summary = engine.getSummary();
+            samples.push({
+                fraction: summary.progressFraction,
+                done: summary.progress?.done ?? -1,
+                total: summary.progress?.total ?? -1,
+                status: summary.status,
+            });
+        };
+        await engine.start(drive.client() as unknown as ProtonDriveClient, SYNC_ROOT);
+        await settled();
+
+        assert.equal(samples.length, 10);
+        assert.ok(samples.every((sample) => sample.status === 'syncing'));
+        const fractions = samples.map((sample) => sample.fraction!);
+        assert.ok(fractions.every((fraction) => fraction > 0 && fraction < 1), `got ${fractions}`);
+        assert.deepEqual([...fractions].sort((a, b) => a - b), fractions, 'never moves back');
+        assert.ok(fractions.at(-1)! - fractions[0] > 0.5, `moves with the transfers: ${fractions}`);
+        assert.equal(samples.at(-1)!.done, samples.at(-1)!.total, 'every file checked before the last transfer');
+        assert.equal(engine.getSummary().progressFraction, null, 'nothing to measure once done');
+    });
+});

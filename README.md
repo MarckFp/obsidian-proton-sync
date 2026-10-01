@@ -239,9 +239,16 @@ Click the status bar item to sync now, or to resume when paused. Right-click it
 for **Pause syncing**, **Show sync conflicts**, the sync panel and the settings.
 
 The **sync panel** shows the same status in the right sidebar, with the details
-(progress, last sync, last error, recent activity) and buttons for **Sync now**,
-**Pause**/**Resume**, reviewing conflicts and the settings. Open it with **Open
-sync panel** from the command palette.
+(progress, last sync, last error), buttons for **Sync now**, **Pause**/**Resume**
+and the settings, and a **Conflicts** button under them. Below that are the
+changes not synced yet, and the **versions of the note you are viewing** on
+Proton Drive: up to the last 50, newest first, ten to a page, each with its date
+and size. Choose one to compare it with the note as it is now, in the same red
+and green diff as conflicts, and **Restore this version** to bring it back. A
+restore is written into the note and synced as a new version, so the version it
+replaces stays in the history and the restore can itself be undone. Open the
+panel with **Open sync panel** from the command palette. The full sync log is in
+the settings, under **Recent activity**.
 
 On mobile, where Obsidian has no status bar, the panel takes its place, out of
 the way of the note until you swipe the right sidebar in. A sync icon in the
