@@ -1,4 +1,4 @@
-import type { SyncStatus, SyncSummary, TransferProgress } from '../sync/engine';
+import type { NoteSyncState, PendingChange, PendingReason, SyncStatus, SyncSummary, TransferProgress } from '../sync/engine';
 import { basename } from '../sync/paths';
 
 /**
@@ -44,6 +44,44 @@ const PRESENTATION: Record<SyncStatus, Presentation> = {
         description: 'On mobile data, and set to sync on Wi-Fi only.',
     },
 };
+
+/** Why a path is not synced, as the sync panel and the current-note indicator put it. */
+export const PENDING_TEXT: Record<PendingReason, string> = {
+    transferring: 'Uploading or downloading now',
+    waiting: 'Waiting to be synced',
+    wifi: 'Waiting for Wi-Fi',
+    retrying: 'Failed to sync; will try again',
+    'too-large': 'Over this device’s size limit, so not synced here',
+    'name-clash': 'Its name clashes with another apart from letter case',
+    conflict: 'Changed in two places; waiting for your decision',
+};
+
+/** The current note's standing, as the indicator beside the sync icon shows it. */
+export type NoteIndicator = {
+    state: NoteSyncState;
+    /** A transfer of this very note is under way. */
+    transferring: boolean;
+    text: string;
+};
+
+export function noteIndicator(state: NoteSyncState, change: PendingChange | undefined): NoteIndicator {
+    const transferring = change?.reason === 'transferring';
+    if (state === 'excluded') {
+        return { state, transferring, text: 'This note is not synced: it is excluded in the settings.' };
+    }
+    if (state === 'synced') {
+        return { state, transferring, text: 'This note is in sync.' };
+    }
+    if (!change) {
+        return { state, transferring, text: 'This note has changes not synced yet.' };
+    }
+    const reason = PENDING_TEXT[change.reason];
+    return {
+        state,
+        transferring,
+        text: `This note is not in sync yet: ${reason.charAt(0).toLowerCase()}${reason.slice(1)}${change.detail ? ` (${change.detail})` : ''}.`,
+    };
+}
 
 /** Longest file name shown in a label before it is shortened. */
 const MAX_NAME_LENGTH = 24;
@@ -94,6 +132,9 @@ export function statusDetails(summary: SyncSummary): string[] {
     }
     if (summary.progress) {
         lines.push(`${summary.progress.done} of ${summary.progress.total} files checked in this pass`);
+    }
+    if (summary.pending > 0) {
+        lines.push(`${summary.pending} change${summary.pending === 1 ? '' : 's'} not synced yet`);
     }
     if (summary.transfer) {
         const { transfer } = summary;

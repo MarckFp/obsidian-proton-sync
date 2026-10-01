@@ -3,7 +3,19 @@
 // load time.
 import './polyfills';
 
-import { apiVersion, type App, Notice, Platform, Plugin, setIcon, setTooltip, TAbstractFile, TFile, TFolder } from 'obsidian';
+import {
+    apiVersion,
+    type App,
+    MarkdownView,
+    Notice,
+    Platform,
+    Plugin,
+    setIcon,
+    setTooltip,
+    TAbstractFile,
+    TFile,
+    TFolder,
+} from 'obsidian';
 
 import { Credentials } from './proton/credentials';
 import { PinProtectedSlot, RememberedUnlock } from './proton/pinLock';
@@ -11,7 +23,7 @@ import { ConflictHistory } from './sync/conflictHistory';
 import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
 import { ProtonSession } from './proton/session';
 import { DEFAULT_SETTINGS, type PluginSettings } from './settings';
-import { SyncEngine, type ConflictEvent, type SyncPlan, type SyncSummary } from './sync/engine';
+import { SyncEngine, type ConflictEvent, type OpenEditor, type SyncPlan, type SyncSummary } from './sync/engine';
 import { SyncState } from './sync/state';
 import { formatLogEntries, Logger } from './util/logger';
 import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor } from './ui/compare';
@@ -24,7 +36,7 @@ import { CONFLICT_POLICIES, ProtonDriveSyncSettingsTab } from './ui/settingsTab'
 import { SetupModal } from './ui/setupModal';
 import { StatusBar } from './ui/statusBar';
 import { SYNC_PANEL_VIEW, SyncPanelView } from './ui/syncPanel';
-import { statusIcon, statusLabel } from './ui/syncStatus';
+import { type NoteIndicator, noteIndicator, statusIcon, statusLabel } from './ui/syncStatus';
 
 /** Where 0.1.0 kept the session; migrated into secret storage on first load. */
 const LEGACY_SESSION_FILE = 'session.json';
@@ -87,6 +99,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     private statusBar!: StatusBar;
     /** The ribbon icon standing in for the status bar on mobile; null on desktop. */
     private ribbonIcon: HTMLElement | null = null;
+    /** The sync-state button added to each note's header on mobile; see {@link updateNoteIndicators}. */
+    private readonly noteActions = new WeakMap<MarkdownView, HTMLElement>();
     /** What the status bar, ribbon icon and panel currently show. */
     private summary!: SyncSummary;
     private pendingConflicts: ConflictEvent[] = [];
@@ -109,6 +123,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 new SyncPanelView(leaf, {
                     summary: () => this.summary,
                     logEntries: () => this.logger.getEntries(),
+                    pendingChanges: () => this.engine.pendingChanges(),
+                    openFile: (path) => void this.app.workspace.openLinkText(path, '', false),
                     syncNow: () => void this.syncNowOrSetUp(),
                     togglePause: () => void this.setPaused(!this.settings.paused),
                     showConflicts: () => new ConflictsModal(this.app, this).open(),
@@ -165,6 +181,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             {
                 isMobile: Platform.isMobileApp,
                 isMetered: () => networkConnection()?.type === 'cellular',
+                isHidden: () => document.visibilityState === 'hidden',
+                openEditor: (path) => this.openEditor(path),
             },
         );
 
@@ -253,7 +271,11 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             this.notify('syncing paused.');
             return;
         }
-        if (this.isConfigured() && this.state.paths().length === 0 && !(await this.confirmFirstSync())) {
+        if (
+            this.isConfigured() &&
+            this.state.paths().length === 0 &&
+            !(await this.confirmFirstSync(this.state.wasLost()))
+        ) {
             this.settings.paused = true;
             await this.saveSettings();
             return;
@@ -499,7 +521,11 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         }
 
         await this.state.load(this.session.accountEmail ?? null, this.settings.remoteFolderUid);
-        if (!this.settings.paused && this.state.paths().length === 0 && !(await this.confirmFirstSync())) {
+        if (
+            !this.settings.paused &&
+            this.state.paths().length === 0 &&
+            !(await this.confirmFirstSync(this.state.wasLost()))
+        ) {
             this.settings.paused = true;
             await this.saveSettings();
         }
@@ -519,7 +545,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * settings and this plugin, nothing the user would miss when Drive's
      * settings replace them.
      */
-    private async confirmFirstSync(): Promise<boolean> {
+    private async confirmFirstSync(stateLost = false): Promise<boolean> {
         const rootUid = this.settings.remoteFolderUid;
         if (!rootUid) {
             return true;
@@ -530,18 +556,30 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         try {
             plan = await this.engine.plan(this.session.getClient(), rootUid);
         } catch (error) {
+            if (stateLost) {
+                // Without the record of the last sync and without a preview,
+                // going ahead would bring deletions back unseen. Hold off.
+                this.logger.error('Could not preview the sync after the sync state was lost; pausing', error);
+                this.notify('the record of the last sync could not be read, so syncing is paused. Resume it to try again.');
+                return false;
+            }
             this.logger.warn('Could not preview the first sync; going ahead, since it deletes nothing', error);
             return true;
         }
         const changes = plan.uploads.length + plan.downloads.length + plan.conflicts.length + plan.removals.length;
-        if (plan.localNotes === 0 || plan.remoteFiles === 0 || changes === 0) {
+        // A lost state is shown whenever there is anything to sync at all: the
+        // user had a sync history and has to hear that it is gone.
+        const worthAsking = stateLost
+            ? plan.localFiles + plan.remoteFiles > 0
+            : plan.localNotes > 0 && plan.remoteFiles > 0 && changes > 0;
+        if (!worthAsking) {
             return true;
         }
 
         const folderName = this.settings.remoteFolderPath ?? 'the Drive folder';
         const policy = CONFLICT_POLICIES[this.settings.conflictPolicy];
         return new Promise((resolve) => {
-            new FirstSyncModal(this.app, plan, folderName, policy.toLowerCase(), resolve).open();
+            new FirstSyncModal(this.app, plan, folderName, policy.toLowerCase(), resolve, stateLost).open();
         });
     }
 
@@ -758,6 +796,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     private showStatus(summary: SyncSummary): void {
         this.summary = summary;
         this.statusBar.update(summary);
+        this.updateNoteIndicators();
         this.refreshSettingsTab();
         if (this.ribbonIcon) {
             setIcon(this.ribbonIcon, statusIcon(summary));
@@ -810,6 +849,93 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         }
     }
 
+    /**
+     * Show whether the note in view is in sync: a pulsing dot beside the
+     * status-bar icon on desktop, green when it is and red when it has changes
+     * not synced yet; on mobile, where there is no status bar, the same dot as
+     * a button in each note's header, which turns into a spinning sync icon
+     * while that note transfers and opens the sync panel when tapped. Hidden
+     * when there is no sync to speak of: signed out, no folder, or locked.
+     */
+    private updateNoteIndicators(): void {
+        const shown = this.isConfigured() && !this.locked;
+        const active = this.app.workspace.getActiveFile();
+        this.statusBar.setNote(shown && active ? this.indicatorFor(active) : null);
+
+        if (!Platform.isMobile) {
+            return;
+        }
+        for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+            const view = leaf.view;
+            if (!(view instanceof MarkdownView) || !view.file) {
+                continue;
+            }
+            let action = this.noteActions.get(view);
+            if (!shown) {
+                action?.hide();
+                continue;
+            }
+            if (!action) {
+                action = view.addAction('circle', 'Sync status', () => void this.openPanel());
+                action.addClass('proton-drive-sync-note-action');
+                this.noteActions.set(view, action);
+            }
+            action.show();
+            renderNoteAction(action, this.indicatorFor(view.file));
+        }
+    }
+
+    /**
+     * The editor a note is open in, for the engine to bring a downloaded
+     * version in through it instead of writing under it.
+     */
+    private openEditor(path: string): OpenEditor | null {
+        for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+            const view = leaf.view;
+            if (view instanceof MarkdownView && view.file?.path === path) {
+                const editor = view.editor;
+                return {
+                    text: () => editor.getValue(),
+                    replace: (next) => {
+                        // Only the part that differs is replaced, so the
+                        // editor maps the cursor and selection through the
+                        // change instead of resetting them.
+                        const current = editor.getValue();
+                        if (current === next) {
+                            return;
+                        }
+                        let start = 0;
+                        while (start < current.length && start < next.length && current[start] === next[start]) {
+                            start++;
+                        }
+                        let end = 0;
+                        while (
+                            end < current.length - start &&
+                            end < next.length - start &&
+                            current[current.length - 1 - end] === next[next.length - 1 - end]
+                        ) {
+                            end++;
+                        }
+                        editor.replaceRange(
+                            next.slice(start, next.length - end),
+                            editor.offsetToPos(start),
+                            editor.offsetToPos(current.length - end),
+                        );
+                    },
+                };
+            }
+        }
+        return null;
+    }
+
+    private indicatorFor(file: TFile): NoteIndicator {
+        const state = this.engine.noteSyncState(file.path, { size: file.stat.size, mtime: file.stat.mtime });
+        return noteIndicator(
+            state,
+            this.engine.pendingChanges().find((change) => change.path === file.path),
+        );
+    }
+
     /** Reveal the sync panel, opening it in the right sidebar if it is not open yet. */
     async openPanel(): Promise<void> {
         const { workspace } = this.app;
@@ -853,6 +979,13 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * waiting out a poll interval that may have been frozen in the background.
      */
     private registerLifecycleEvents(): void {
+        // The current-note indicator follows the note in view and its edits.
+        const update = () => this.updateNoteIndicators();
+        this.registerEvent(this.app.workspace.on('active-leaf-change', update));
+        this.registerEvent(this.app.workspace.on('layout-change', update));
+        this.registerEvent(this.app.workspace.on('file-open', update));
+        this.registerEvent(this.app.vault.on('modify', update));
+
         this.registerDomEvent(document, 'visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
                 this.engine.flushPendingEdits();
@@ -943,4 +1076,17 @@ function defaultDeviceName(): string {
     } catch {
         return 'this device';
     }
+}
+
+/** The mobile header button: a spinning sync icon while the note transfers, else the dot. */
+function renderNoteAction(action: HTMLElement, note: NoteIndicator): void {
+    action.empty();
+    action.toggleClass('proton-drive-sync-spin', note.transferring);
+    if (note.transferring) {
+        setIcon(action, 'refresh-cw');
+    } else {
+        action.createSpan({ cls: `proton-drive-sync-note-dot mod-${note.state}` });
+    }
+    setTooltip(action, note.text);
+    action.setAttr('aria-label', note.text);
 }

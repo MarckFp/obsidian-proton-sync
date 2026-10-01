@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import type { SyncSummary } from '../src/sync/engine';
-import { statusIcon, statusLabel, timeAgo } from '../src/ui/syncStatus';
+import { noteIndicator, statusIcon, statusLabel, timeAgo } from '../src/ui/syncStatus';
 
 const base: SyncSummary = {
     status: 'idle',
@@ -13,6 +13,7 @@ const base: SyncSummary = {
     downloaded: 0,
     progress: null,
     transfer: null,
+    pending: 0,
 };
 
 describe('statusLabel', () => {
@@ -58,5 +59,24 @@ describe('the locked state', () => {
         const summary = { ...base, status: 'locked' as const, conflicts: 3 };
         assert.equal(statusIcon(summary), 'lock');
         assert.equal(statusLabel(summary), 'Sync locked');
+    });
+});
+
+describe('noteIndicator', () => {
+    it('says whether the note in view is in sync, and why not', () => {
+        assert.equal(noteIndicator('synced', undefined).text, 'This note is in sync.');
+        assert.equal(
+            noteIndicator('pending', { path: 'a.md', reason: 'wifi' }).text,
+            'This note is not in sync yet: waiting for Wi-Fi.',
+        );
+        assert.equal(
+            noteIndicator('pending', { path: 'a.md', reason: 'retrying', detail: 'failed 2 times' }).text,
+            'This note is not in sync yet: failed to sync; will try again (failed 2 times).',
+        );
+        assert.equal(noteIndicator('pending', undefined).text, 'This note has changes not synced yet.');
+    });
+
+    it('marks a note whose transfer is under way', () => {
+        assert.equal(noteIndicator('pending', { path: 'a.md', reason: 'transferring' }).transferring, true);
     });
 });

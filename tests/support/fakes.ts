@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 
 import { DriveEventType, NodeWithSameNameExistsValidationError } from '@protontech/drive-sdk';
 
-import type { App, DataAdapter } from 'obsidian';
+import { TFile, TFolder, type App, type DataAdapter, type TAbstractFile } from 'obsidian';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -29,6 +29,8 @@ function parentOf(path: string): string {
 export class MemoryVault {
     readonly files = new Map<string, { data: Uint8Array; mtime: number }>();
     readonly folders = new Set<string>();
+    /** Operations that went through the Vault API or the file manager, rather than the adapter. */
+    readonly viaVaultApi: [string, string][] = [];
     private clock = 1_000_000;
 
     write(path: string, text: string): void {
@@ -86,8 +88,56 @@ export class MemoryVault {
         return [...this.files.keys()].filter((path) => !path.startsWith('.obsidian/')).sort();
     }
 
+    /**
+     * Obsidian's app, as far as the plugin uses it: the adapter, and the parts
+     * of the Vault API and file manager that work on the files Obsidian
+     * indexes, which, as in Obsidian, are those with no dot-named segment.
+     */
     app(): App {
-        return { vault: { adapter: this.adapter(), configDir: '.obsidian' } } as unknown as App;
+        const vault = this;
+        const adapter = this.adapter();
+        const lookup = (path: string): TAbstractFile | null => {
+            if (path.split('/').some((segment) => segment.startsWith('.'))) {
+                return null;
+            }
+            if (vault.files.has(path)) {
+                return Object.assign(new TFile(), { path });
+            }
+            return vault.folders.has(path) ? Object.assign(new TFolder(), { path }) : null;
+        };
+        return {
+            vault: {
+                adapter,
+                configDir: '.obsidian',
+                getAbstractFileByPath: lookup,
+                async modifyBinary(file: TFile, data: ArrayBuffer, options?: { mtime?: number }) {
+                    vault.viaVaultApi.push(['modify', file.path]);
+                    await adapter.writeBinary(file.path, data, options);
+                },
+                async createBinary(path: string, data: ArrayBuffer, options?: { mtime?: number }) {
+                    if (vault.files.has(path)) {
+                        throw new Error('File already exists.');
+                    }
+                    vault.viaVaultApi.push(['create', path]);
+                    await adapter.writeBinary(path, data, options);
+                    return lookup(path);
+                },
+                async rename(file: TAbstractFile, to: string) {
+                    vault.viaVaultApi.push(['rename', file.path]);
+                    vault.rename(file.path, to);
+                },
+                async copy(file: TFile, to: string) {
+                    vault.viaVaultApi.push(['copy', file.path]);
+                    await adapter.copy(file.path, to);
+                },
+            },
+            fileManager: {
+                async trashFile(file: TAbstractFile) {
+                    vault.viaVaultApi.push(['trash', file.path]);
+                    vault.remove(file.path);
+                },
+            },
+        } as unknown as App;
     }
 
     adapter(): DataAdapter {
@@ -198,12 +248,22 @@ export class FakeDrive {
      * another device can save the same file.
      */
     duringRevisionUpload: ((nodeUid: string) => void) | null = null;
+    /** Runs while a download is in flight, before its bytes are handed over: the window in which the user can save the same note. */
+    duringDownload: (() => void) | null = null;
     /** Like {@link duringRevisionUpload}, for the upload of a new file. */
     duringNewFileUpload: ((name: string) => void) | null = null;
     /** Makes the event feed fail after yielding this many events, once. */
     failEventsAfter: number | null = null;
     /** How many nodes have been looked up one by one or in batches. */
     lookups = 0;
+    /**
+     * Record an event for every change a client makes, as Drive does. Off by
+     * default, where tests emit the events they mean to deliver themselves;
+     * the multi-device simulation turns it on.
+     */
+    autoEvents = false;
+    /** Folder listings so far: what a full walk of the tree costs. */
+    listings = 0;
     /** Names of uploaded files, in the order their uploads completed. */
     readonly uploadLog: string[] = [];
     private readonly events: {
@@ -217,6 +277,13 @@ export class FakeDrive {
     }[] = [];
 
     /** Record that a node changed, as Drive's event feed would. */
+    /** Called on every client change; emits only with {@link autoEvents}. */
+    private changed(node: FakeNode, type: DriveEventType): void {
+        if (this.autoEvents) {
+            this.emit(node, type);
+        }
+    }
+
     emit(node: FakeNode, type: DriveEventType = DriveEventType.NodeUpdated): void {
         this.events.push({
             type,
@@ -269,6 +336,14 @@ export class FakeDrive {
 
     notePaths(): string[] {
         return this.filePaths().filter((path) => !path.startsWith('.obsidian/'));
+    }
+
+    /** Simulate another device deleting a file: it goes to Drive's trash. */
+    trash(path: string): void {
+        const node = this.at(path);
+        if (node) {
+            node.trashed = true;
+        }
     }
 
     /** Simulate another device writing a file. */
@@ -326,6 +401,7 @@ export class FakeDrive {
                 return chain;
             },
             async *iterateFolderChildrenNodeUids(uid: string) {
+                drive.listings++;
                 for (const node of drive.nodes.values()) {
                     if (node.parentUid === uid) {
                         yield node.uid;
@@ -336,6 +412,7 @@ export class FakeDrive {
                 drive.assertFree(parentUid, name);
                 const node = drive.folder(drive.nextUid('folder'), parentUid, name);
                 drive.nodes.set(node.uid, node);
+                drive.changed(node, DriveEventType.NodeCreated);
                 return drive.entity(node);
             },
             async getFileUploader(parentUid: string, name: string, metadata: UploadMetadata) {
@@ -389,6 +466,7 @@ export class FakeDrive {
             async *trashNodes(uids: string[]) {
                 for (const uid of uids) {
                     drive.nodes.get(uid)!.trashed = true;
+                    drive.changed(drive.nodes.get(uid)!, DriveEventType.NodeUpdated);
                     yield { uid, ok: true };
                 }
             },
@@ -396,6 +474,7 @@ export class FakeDrive {
                 const node = drive.nodes.get(uid)!;
                 drive.assertFree(node.parentUid!, name);
                 node.name = name;
+                drive.changed(node, DriveEventType.NodeUpdated);
                 return drive.entity(node);
             },
             async *moveNodes(uids: string[], parentUid: string) {
@@ -403,6 +482,7 @@ export class FakeDrive {
                     const node = drive.nodes.get(uid)!;
                     drive.assertFree(parentUid, node.name);
                     node.parentUid = parentUid;
+                    drive.changed(node, DriveEventType.NodeUpdated);
                     yield { uid, ok: true };
                 }
             },
@@ -454,17 +534,21 @@ export class FakeDrive {
                 }
                 onProgress?.(data.byteLength);
                 const node = target();
+                const created = node.revision === undefined;
                 drive.addRevision(node, data, metadata.modificationTime);
                 drive.uploadLog.push(node.name);
+                drive.changed(node, created ? DriveEventType.NodeCreated : DriveEventType.NodeUpdated);
                 return { completion: async () => ({ nodeUid: node.uid, nodeRevisionUid: node.revision!.uid }) };
             },
         };
     }
 
     private downloader(revision: FakeRevision) {
+        const drive = this;
         return {
             downloadToStream(sink: WritableStream<Uint8Array>) {
                 const done = (async () => {
+                    drive.duringDownload?.();
                     const writer = sink.getWriter();
                     await writer.write(revision.data.slice());
                     await writer.close();

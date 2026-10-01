@@ -40,31 +40,46 @@ export async function runPooled<T>(
  *
  * Where {@link runPooled} owns a fixed list of tasks, a limiter is shared by
  * tasks that only sometimes need the scarce resource: a full sync checks every
- * file quickly, and only the few that need a transfer queue up here.
+ * file quickly, and only the few that need a transfer queue up here. The limit
+ * may be a function, read each time a slot frees or a task arrives, so it can
+ * rise and fall while tasks wait.
  */
 export class Limiter {
     private active = 0;
     private readonly waiting: (() => void)[] = [];
+    private readonly limit: () => number;
 
-    constructor(private readonly concurrency: number) {}
+    constructor(concurrency: number | (() => number)) {
+        this.limit = typeof concurrency === 'number' ? () => concurrency : concurrency;
+    }
 
     async run<T>(task: () => Promise<T>): Promise<T> {
-        if (this.active >= Math.max(1, this.concurrency)) {
-            await new Promise<void>((resolve) => this.waiting.push(resolve));
+        // Behind anyone already waiting, even if the limit has just risen,
+        // so the queue keeps its order.
+        if (this.waiting.length > 0 || this.active >= this.capacity()) {
+            const turn = new Promise<void>((resolve) => this.waiting.push(resolve));
+            this.pump();
+            await turn;
         } else {
             this.active++;
         }
         try {
             return await task();
         } finally {
-            // Hand the slot straight to the next waiter, so the count never
-            // dips and lets a newcomer jump the queue.
-            const next = this.waiting.shift();
-            if (next) {
-                next();
-            } else {
-                this.active--;
-            }
+            this.active--;
+            this.pump();
         }
+    }
+
+    /** Let waiting tasks in while there is room. */
+    private pump(): void {
+        while (this.waiting.length > 0 && this.active < this.capacity()) {
+            this.active++;
+            this.waiting.shift()!();
+        }
+    }
+
+    private capacity(): number {
+        return Math.max(1, this.limit());
     }
 }

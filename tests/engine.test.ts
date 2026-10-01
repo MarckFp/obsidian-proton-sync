@@ -7,6 +7,7 @@ import { DEFAULT_SETTINGS, type PluginSettings } from '../src/settings';
 import { SyncEngine, type ConflictEvent, type EngineEnvironment } from '../src/sync/engine';
 import { SyncState } from '../src/sync/state';
 import { Logger } from '../src/util/logger';
+import { requestStats } from '../src/util/requestStats';
 import { FakeDrive, MemoryVault, SYNC_ROOT, VOLUME_ROOT } from './support/fakes';
 
 const SILENT = new Logger('error');
@@ -652,18 +653,6 @@ describe('SyncEngine — review fixes', () => {
         assert.deepEqual(drive.notePaths(), ['Same.md']);
     });
 
-    it('leaves names that differ only in case alone', async () => {
-        const drive = new FakeDrive();
-        drive.put('Note.md', 'upper');
-        drive.put('note.md', 'lower');
-        const vault = new MemoryVault();
-        await setup({ vault, drive });
-
-        assert.deepEqual(vault.notePaths(), []);
-        assert.equal(drive.text('Note.md'), 'upper');
-        assert.equal(drive.text('note.md'), 'lower');
-    });
-
     it('waits for a deleted folder’s files before removing it from Drive', async () => {
         const vault = new MemoryVault();
         vault.write('Old/a.md', 'a');
@@ -949,5 +938,570 @@ describe('SyncEngine — a new vault joining an existing one', () => {
             '.obsidian/community-plugins.json',
         ]);
         assert.deepEqual(plan.downloads, ['Note.md']);
+    });
+});
+
+describe('SyncEngine — changes made while a transfer is in flight (issues #3 and #4)', () => {
+    /** Two notes, synced. `b.md` is the longer, so `a.md` is transferred first. */
+    async function syncedPair(settings: Partial<PluginSettings> = {}) {
+        const vault = new MemoryVault();
+        vault.write('a.md', 'a');
+        vault.write('b.md', 'the second, longer note');
+        const result = await setup({ vault, settings: { transferConcurrency: 1, ...settings } });
+        await result.settled();
+        return result;
+    }
+
+    it('keeps an edit saved while a download of the same note was in flight', async () => {
+        const { vault, drive, engine, conflicts, settled } = await syncedPair();
+        drive.emit(drive.put('b.md', 'edited on the phone'));
+        drive.duringDownload = () => {
+            drive.duringDownload = null;
+            vault.write('b.md', 'typed here during the download');
+        };
+        engine.pollNow();
+        await settled();
+
+        // Nothing lost: this device's text keeps the name, Drive's sits beside it.
+        assert.equal(vault.read('b.md'), 'typed here during the download');
+        assert.equal(drive.text('b.md'), 'typed here during the download');
+        assert.equal(conflicts.length, 1);
+        assert.equal(vault.read(conflicts[0].copyPath!), 'edited on the phone');
+    });
+
+    it('does not trash a note that another device edited after the decision to delete it', async () => {
+        const { vault, drive, engine, settled } = await syncedPair();
+        vault.remove('b.md');
+        vault.write('a.md', 'A');
+        // While a.md uploads, b.md, already decided as a deletion, is edited on another device.
+        drive.duringRevisionUpload = () => {
+            drive.duringRevisionUpload = null;
+            drive.put('b.md', 'edited elsewhere in the meantime');
+        };
+        await engine.syncNow();
+        await settled();
+        assert.equal(drive.text('b.md'), 'edited elsewhere in the meantime');
+
+        // The next pass sees an edit against a local deletion, and the edit wins.
+        await engine.syncNow();
+        await settled();
+        assert.equal(vault.read('b.md'), 'edited elsewhere in the meantime');
+    });
+
+    it('keeps a note edited here after the decision to delete it, deleted elsewhere', async () => {
+        const { vault, drive, engine, settled } = await syncedPair();
+        drive.trash('b.md');
+        vault.write('a.md', 'A');
+        drive.duringRevisionUpload = () => {
+            drive.duringRevisionUpload = null;
+            vault.write('b.md', 'saved here in the meantime');
+        };
+        await engine.syncNow();
+        await settled();
+
+        assert.equal(vault.read('b.md'), 'saved here in the meantime');
+        assert.equal(drive.text('b.md'), 'saved here in the meantime');
+    });
+
+    it('downloads the revision it decided on, and records exactly that one', async () => {
+        const { vault, drive, engine, state, settled } = await syncedPair();
+        drive.put('b.md', 'revision one, long enough to go second');
+        vault.write('a.md', 'A');
+        drive.duringRevisionUpload = () => {
+            drive.duringRevisionUpload = null;
+            drive.put('b.md', 'revision two, uploaded after the decision');
+        };
+        await engine.syncNow();
+        await settled();
+
+        const node = drive.at('b.md')!;
+        const decided = node.history.at(-2)!;
+        assert.equal(vault.read('b.md'), 'revision one, long enough to go second');
+        assert.equal(state.get('b.md')?.base?.remoteRevisionUid, decided.uid);
+
+        // The newer revision is an ordinary remote change for the next pass.
+        await engine.syncNow();
+        await settled();
+        assert.equal(vault.read('b.md'), 'revision two, uploaded after the decision');
+    });
+});
+
+describe('SyncEngine — renames that never produced a rename event (issue #2)', () => {
+    async function synced(files: Record<string, string>) {
+        const vault = new MemoryVault();
+        for (const [path, text] of Object.entries(files)) {
+            vault.write(path, text);
+        }
+        const result = await setup({ vault });
+        await result.settled();
+        return { ...result, uploadsBefore: result.drive.uploadLog.length };
+    }
+
+    it('carries a rename made while paused over as a rename, keeping the Drive node', async () => {
+        const { vault, drive, engine, settled, uploadsBefore } = await synced({ 'Untitled.md': 'my plan' });
+        const uid = drive.at('Untitled.md')!.uid;
+
+        engine.pause();
+        vault.rename('Untitled.md', 'Plan.md');
+        engine.onVaultRename('Untitled.md', 'Plan.md', false); // ignored while paused
+        await engine.resume();
+        await settled();
+
+        assert.equal(drive.at('Plan.md')?.uid, uid);
+        assert.equal(drive.at('Untitled.md'), undefined);
+        assert.equal(drive.at('Plan.md')?.history.length, 1);
+        assert.equal(drive.uploadLog.length, uploadsBefore);
+    });
+
+    it('follows a move made outside Obsidian, where there is no event at all', async () => {
+        const { vault, drive, engine, settled, uploadsBefore } = await synced({ 'inbox/idea.md': 'an idea' });
+        const uid = drive.at('inbox/idea.md')!.uid;
+
+        vault.rename('inbox/idea.md', 'projects/idea.md');
+        await engine.syncNow();
+        await settled();
+
+        assert.equal(drive.at('projects/idea.md')?.uid, uid);
+        assert.equal(drive.at('inbox/idea.md'), undefined);
+        assert.equal(drive.uploadLog.length, uploadsBefore);
+    });
+
+    it('moves every file of a folder renamed unseen, and removes the old folder', async () => {
+        const { vault, drive, engine, settled, uploadsBefore } = await synced({
+            'Photos 2025/a.png': 'image a',
+            'Photos 2025/b.png': 'image b',
+        });
+        const uids = [drive.at('Photos 2025/a.png')!.uid, drive.at('Photos 2025/b.png')!.uid];
+
+        vault.rename('Photos 2025', 'Photos');
+        await engine.syncNow();
+        await settled();
+
+        assert.deepEqual([drive.at('Photos/a.png')?.uid, drive.at('Photos/b.png')?.uid], uids);
+        assert.equal(drive.at('Photos 2025'), undefined);
+        assert.equal(drive.uploadLog.length, uploadsBefore);
+    });
+
+    it('falls back to delete and upload when the content does not say which file went where', async () => {
+        const { vault, drive, engine, settled } = await synced({ 'one.md': 'same', 'two.md': 'same' });
+
+        vault.rename('one.md', 'uno.md');
+        vault.rename('two.md', 'dos.md');
+        await engine.syncNow();
+        await settled();
+
+        assert.deepEqual(drive.notePaths(), ['dos.md', 'uno.md']);
+        assert.equal(drive.text('uno.md'), 'same');
+    });
+
+    it('does not pair a rename over an edit another device made to the old note', async () => {
+        const { vault, drive, engine, settled } = await synced({ 'draft.md': 'version one' });
+
+        vault.rename('draft.md', 'final.md');
+        drive.put('draft.md', 'edited on the phone');
+        await engine.syncNow();
+        await settled();
+
+        // Neither version is lost: the edit comes back under the old name.
+        assert.equal(vault.read('final.md'), 'version one');
+        assert.equal(vault.read('draft.md'), 'edited on the phone');
+        assert.equal(drive.text('final.md'), 'version one');
+    });
+});
+
+describe('SyncEngine — what survives a restart (issue #1)', () => {
+    it('retries a remote change that failed to apply, even after Obsidian restarts', async () => {
+        const vault = new MemoryVault();
+        vault.write('note.md', 'old');
+        const drive = new FakeDrive();
+        const first = await setup({ vault, drive });
+
+        drive.emit(drive.put('note.md', 'new'));
+        drive.failLookups = true;
+        first.engine.pollNow();
+        await first.settled();
+        assert.equal(vault.read('note.md'), 'old');
+        // Closed before the in-memory retry used to run; the cursor has moved on.
+        await first.engine.stop();
+
+        drive.failLookups = false;
+        const second = await setup({ vault, drive, settings: { syncOnStartup: false } });
+        second.engine.pollNow();
+        await second.settled();
+        assert.equal(vault.read('note.md'), 'new');
+    });
+
+    it('catches up on start-up from the saved event position, without walking the Drive folder', async () => {
+        const vault = new MemoryVault();
+        // As in a real vault, the plugin's folder exists before the first sync.
+        vault.mkdir(PLUGIN_DIR);
+        vault.write('mine.md', 'v1');
+        vault.write('theirs.md', 'v1');
+        const drive = new FakeDrive();
+        const first = await setup({ vault, drive });
+        await first.engine.stop();
+
+        // While Obsidian is closed: an edit here, and one on another device.
+        vault.write('mine.md', 'edited here while closed');
+        drive.emit(drive.put('theirs.md', 'edited elsewhere while closed'));
+
+        const listingsBefore = drive.listings;
+        const second = await setup({ vault, drive });
+        await second.settled();
+
+        assert.equal(drive.text('mine.md'), 'edited here while closed');
+        assert.equal(vault.read('theirs.md'), 'edited elsewhere while closed');
+        assert.equal(drive.listings, listingsBefore, 'no folder was listed');
+        assert.equal(second.engine.getSummary().status, 'idle');
+    });
+
+    it('still walks the folder on start-up when a file went missing while closed, and keeps a rename a rename', async () => {
+        const vault = new MemoryVault();
+        vault.write('Untitled.md', 'my plan');
+        const drive = new FakeDrive();
+        const first = await setup({ vault, drive });
+        const uid = drive.at('Untitled.md')!.uid;
+        await first.engine.stop();
+
+        vault.rename('Untitled.md', 'Plan.md');
+        const listingsBefore = drive.listings;
+        const second = await setup({ vault, drive });
+        await second.settled();
+
+        assert.ok(drive.listings > listingsBefore, 'the folder was walked');
+        assert.equal(drive.at('Plan.md')?.uid, uid);
+    });
+});
+
+describe('SyncEngine — names that differ only in letter case (issue #5)', () => {
+    const insensitive: EngineEnvironment = { isMobile: false, isMetered: () => false, caseInsensitive: true };
+
+    it('syncs both where the filesystem can keep them apart', async () => {
+        const drive = new FakeDrive();
+        drive.put('Note.md', 'upper');
+        drive.put('note.md', 'lower');
+        const { vault, settled } = await setup({ drive, environment: { ...insensitive, caseInsensitive: false } });
+        await settled();
+
+        assert.deepEqual(vault.notePaths(), ['Note.md', 'note.md']);
+    });
+
+    it('renames one of them on Drive where it cannot, so both still sync, and says so', async () => {
+        const drive = new FakeDrive();
+        drive.put('Note.md', 'upper');
+        drive.put('note.md', 'lower');
+        const { vault, conflicts, settled } = await setup({ drive, environment: insensitive });
+        await settled();
+
+        const paths = vault.notePaths();
+        assert.equal(paths.length, 2);
+        assert.ok(paths.some((path) => path.includes('(case conflict)')), `got ${paths}`);
+        assert.deepEqual(new Set(paths.map((path) => vault.read(path))), new Set(['upper', 'lower']));
+        assert.deepEqual(drive.notePaths(), [...paths].sort());
+        assert.equal(conflicts[0]?.reason, 'case-collision');
+        assert.equal(conflicts[0]?.outcome, 'renamed');
+    });
+
+    it('keeps the synced note’s name when a clashing one arrives through Drive’s events', async () => {
+        const vault = new MemoryVault();
+        vault.write('Note.md', 'mine');
+        const { drive, engine, conflicts, settled } = await setup({ vault, environment: insensitive });
+
+        drive.emit(drive.put('note.md', 'from a Linux machine'), DriveEventType.NodeCreated);
+        engine.pollNow();
+        await settled();
+
+        assert.equal(vault.read('Note.md'), 'mine');
+        assert.equal(vault.read('note (case conflict).md'), 'from a Linux machine');
+        assert.equal(drive.text('Note.md'), 'mine');
+        assert.equal(conflicts.at(-1)?.copyPath, 'note (case conflict).md');
+    });
+
+    it('settles folders that clash, with the files inside them', async () => {
+        const vault = new MemoryVault();
+        vault.write('Notes/a.md', 'a');
+        const { drive, engine, settled } = await setup({ vault, environment: insensitive });
+
+        drive.put('notes/b.md', 'b');
+        await engine.syncNow();
+        await settled();
+
+        assert.deepEqual(vault.notePaths(), ['Notes/a.md', 'notes (case conflict)/b.md']);
+        assert.equal(vault.read('notes (case conflict)/b.md'), 'b');
+    });
+
+    it('settles a clash with a new file in the vault in favour of the vault', async () => {
+        const vault = new MemoryVault();
+        vault.write('Ideas.md', 'written here');
+        const drive = new FakeDrive();
+        drive.put('ideas.md', 'written elsewhere');
+        await setup({ vault, drive, environment: insensitive });
+
+        assert.equal(drive.text('Ideas.md'), 'written here');
+        assert.equal(drive.text('ideas (case conflict).md'), 'written elsewhere');
+        assert.equal(vault.read('ideas (case conflict).md'), 'written elsewhere');
+    });
+});
+
+describe('SyncEngine — going through Obsidian’s Vault API (issue #6)', () => {
+    it('deletes a note the way the user chose for deleted files, and writes notes through the Vault API', async () => {
+        const vault = new MemoryVault();
+        vault.write('gone.md', 'bye');
+        const { drive, engine, settled } = await setup({ vault });
+
+        drive.trash('gone.md');
+        drive.put('new.md', 'hello');
+        await engine.syncNow();
+        await settled();
+
+        assert.equal(vault.read('gone.md'), undefined);
+        assert.ok(vault.viaVaultApi.some(([op, path]) => op === 'trash' && path === 'gone.md'));
+        assert.ok(vault.viaVaultApi.some(([op, path]) => op === 'create' && path === 'new.md'));
+    });
+
+    it('keeps using the adapter for the config folder, which Obsidian does not index', async () => {
+        const vault = new MemoryVault();
+        vault.write('.obsidian/app.json', '{}');
+        const { drive, engine, settled } = await setup({ vault });
+
+        drive.put('.obsidian/app.json', '{"vimMode":true}');
+        drive.trash('.obsidian/app.json');
+        drive.put('.obsidian/hotkeys.json', '{}');
+        await engine.syncNow();
+        await settled();
+
+        assert.equal(vault.read('.obsidian/hotkeys.json'), '{}');
+        assert.deepEqual(
+            vault.viaVaultApi.filter(([, path]) => path.startsWith('.obsidian/')),
+            [],
+        );
+    });
+});
+
+describe('SyncEngine — checking Drive just before uploading', () => {
+    it('merges an edit another device uploaded after the decision, instead of uploading over it', async () => {
+        const vault = new MemoryVault();
+        vault.write('a.md', 'a');
+        vault.write('b.md', 'line one\nline two\nline three, the longest');
+        const { drive, engine, settled } = await setup({
+            vault,
+            settings: { transferConcurrency: 1, conflictPolicy: 'merge' },
+        });
+        await settled();
+
+        vault.write('a.md', 'A');
+        vault.write('b.md', 'LINE ONE\nline two\nline three, the longest');
+        // While a.md uploads, after b.md's upload was decided, another device saves b.md.
+        drive.duringRevisionUpload = () => {
+            drive.duringRevisionUpload = null;
+            drive.put('b.md', 'line one\nline two\nLINE THREE, the longest');
+        };
+        await engine.syncNow();
+        await settled();
+        engine.pollNow();
+        await settled();
+
+        assert.equal(drive.text('b.md'), 'LINE ONE\nline two\nLINE THREE, the longest');
+        assert.equal(vault.read('b.md'), 'LINE ONE\nline two\nLINE THREE, the longest');
+        assert.deepEqual(vault.notePaths().filter((path) => path.includes('conflict')), []);
+    });
+});
+
+describe('SyncEngine — adapting how often Drive is checked', () => {
+    it('checks more often right after a change, less after a quiet spell, and least while hidden', async () => {
+        let hidden = false;
+        const { vault, engine } = await setup({
+            settings: { remotePollSeconds: 30 },
+            environment: { isMobile: false, isMetered: () => false, isHidden: () => hidden },
+        });
+        const now = Date.now();
+
+        // Nothing has happened yet: the quiet pace.
+        assert.equal(engine.pollIntervalSeconds(now), 120);
+
+        vault.write('note.md', 'typed');
+        engine.onVaultChange('note.md');
+        assert.equal(engine.pollIntervalSeconds(Date.now()), 15);
+        assert.equal(engine.pollIntervalSeconds(Date.now() + 5 * 60_000), 30);
+        assert.equal(engine.pollIntervalSeconds(Date.now() + 11 * 60_000), 120);
+
+        hidden = true;
+        assert.equal(engine.pollIntervalSeconds(Date.now()), 120);
+    });
+
+    it('never goes below the minimum, nor above five minutes', async () => {
+        const fast = await setup({ settings: { remotePollSeconds: 15 } });
+        fast.vault.write('note.md', 'x');
+        fast.engine.onVaultChange('note.md');
+        assert.equal(fast.engine.pollIntervalSeconds(), 15);
+
+        const slow = await setup({ settings: { remotePollSeconds: 200 } });
+        assert.equal(slow.engine.pollIntervalSeconds(), 300);
+    });
+});
+
+describe('SyncEngine — finding the transfer pace', () => {
+    afterEach(() => requestStats.reset());
+
+    it('starts at two, climbs to the setting while Proton keeps up, and halves when it asks to slow down', async () => {
+        const vault = new MemoryVault();
+        for (let i = 0; i < 12; i++) {
+            vault.write(`note-${i}.md`, `note ${i}`);
+        }
+        const { engine, settled } = await setup({ vault, start: false, settings: { transferConcurrency: 4 } });
+        assert.equal(engine.currentTransferLimit(), 2);
+
+        const drive = new FakeDrive();
+        await engine.start(drive.client() as unknown as ProtonDriveClient, SYNC_ROOT);
+        await settled();
+        assert.equal(engine.currentTransferLimit(), 4);
+
+        requestStats.record(429);
+        vault.write('note-0.md', 'edited');
+        engine.onVaultChange('note-0.md');
+        await settled();
+        assert.equal(engine.currentTransferLimit(), 2);
+    });
+});
+
+describe('SyncEngine — what is not synced yet, and why', () => {
+    const stat = (vault: MemoryVault, path: string) => {
+        const file = vault.files.get(path)!;
+        return { size: file.data.byteLength, mtime: file.mtime };
+    };
+
+    it('lists an edit held back on mobile data, and one too large for this device', async () => {
+        let metered = false;
+        const vault = new MemoryVault();
+        vault.write('note.md', 'v1');
+        vault.write('video.mp4', 'x'.repeat(2 * 1024 * 1024));
+        const { engine, settled } = await setup({
+            vault,
+            settings: { wifiOnly: true, maxFileSizeMb: 1 },
+            environment: { isMobile: true, isMetered: () => metered },
+        });
+
+        metered = true;
+        vault.write('note.md', 'v2');
+        engine.onVaultChange('note.md');
+        await settled();
+
+        assert.deepEqual(engine.pendingChanges(), [
+            { path: 'note.md', reason: 'wifi' },
+            { path: 'video.mp4', reason: 'too-large', detail: '2 MB' },
+        ]);
+        assert.equal(engine.getSummary().pending, 2);
+    });
+
+    it('lists a change that failed, with how often and when it is tried next', async () => {
+        const vault = new MemoryVault();
+        vault.write('note.md', 'old');
+        const { drive, engine, settled } = await setup({ vault });
+        drive.emit(drive.put('note.md', 'new'));
+        drive.failLookups = true;
+        engine.pollNow();
+        await settled();
+
+        const [change] = engine.pendingChanges();
+        assert.equal(change.path, 'note.md');
+        assert.equal(change.reason, 'retrying');
+        assert.match(change.detail!, /failed 1 time; next try with the next check/);
+    });
+
+    it('tells whether one note is in sync, including edits nothing has queued yet', async () => {
+        const vault = new MemoryVault();
+        vault.write('note.md', 'v1');
+        vault.write('.obsidian/workspace.json', '{}');
+        const { engine } = await setup({ vault });
+
+        assert.equal(engine.noteSyncState('note.md', stat(vault, 'note.md')), 'synced');
+        engine.pause();
+        vault.write('note.md', 'edited while paused');
+        assert.equal(engine.noteSyncState('note.md', stat(vault, 'note.md')), 'pending');
+        assert.equal(engine.noteSyncState('.obsidian/workspace.json', null), 'excluded');
+        assert.equal(engine.noteSyncState('brand-new.md', null), 'pending');
+    });
+});
+
+describe('SyncEngine — bringing remote changes in through an open editor', () => {
+    /** A note open in an editor, which may hold typing the vault file does not have yet. */
+    function fakeEditor(vault: MemoryVault, path: string) {
+        const editor = {
+            content: vault.read(path) ?? '',
+            replaced: 0,
+            text: () => editor.content,
+            replace: (next: string) => {
+                editor.content = next;
+                editor.replaced++;
+            },
+            /** What Obsidian does a moment later: write the editor's text to the file. */
+            save: () => vault.write(path, editor.content),
+        };
+        return editor;
+    }
+
+    async function open(text: string) {
+        const vault = new MemoryVault();
+        vault.write('note.md', text);
+        let editor: ReturnType<typeof fakeEditor> | null = null;
+        const result = await setup({
+            vault,
+            environment: {
+                isMobile: false,
+                isMetered: () => false,
+                openEditor: (path) => (path === 'note.md' ? editor : null),
+            },
+        });
+        editor = fakeEditor(vault, 'note.md');
+        return { ...result, editor };
+    }
+
+    it('shows a new version in the editor, keeping the cursor, when nothing is unsaved', async () => {
+        const { vault, drive, engine, editor, settled } = await open('line one\nline two');
+        drive.emit(drive.put('note.md', 'line one\nline two\nline three'));
+        engine.pollNow();
+        await settled();
+
+        assert.equal(editor.replaced, 1);
+        assert.equal(editor.content, 'line one\nline two\nline three');
+        assert.equal(vault.read('note.md'), 'line one\nline two\nline three');
+    });
+
+    it('merges a new version into unsaved typing, writes nothing under it, and uploads the merge once saved', async () => {
+        const { vault, drive, engine, editor, conflicts, settled } = await open('line one\nline two\nline three');
+        editor.content = 'LINE ONE\nline two\nline three'; // typed, not saved yet
+        drive.emit(drive.put('note.md', 'line one\nline two\nLINE THREE'));
+        engine.pollNow();
+        await settled();
+
+        assert.equal(editor.content, 'LINE ONE\nline two\nLINE THREE');
+        assert.equal(vault.read('note.md'), 'line one\nline two\nline three', 'nothing written under the editor');
+
+        editor.save();
+        engine.onVaultChange('note.md');
+        await settled();
+
+        assert.equal(drive.text('note.md'), 'LINE ONE\nline two\nLINE THREE');
+        assert.deepEqual(conflicts, []);
+        assert.deepEqual(vault.notePaths(), ['note.md']);
+    });
+
+    it('leaves overlapping unsaved typing alone, and keeps both versions once it is saved', async () => {
+        const { vault, drive, engine, editor, settled } = await open('meet on Monday');
+        editor.content = 'meet on Tuesday';
+        drive.emit(drive.put('note.md', 'meet on Friday'));
+        engine.pollNow();
+        await settled();
+
+        assert.equal(editor.content, 'meet on Tuesday');
+        assert.equal(vault.read('note.md'), 'meet on Monday');
+
+        editor.save();
+        engine.onVaultChange('note.md');
+        await settled();
+
+        assert.equal(vault.read('note.md'), 'meet on Tuesday');
+        const copy = vault.notePaths().find((path) => path.includes('conflict'));
+        assert.equal(copy && vault.read(copy), 'meet on Friday');
     });
 });

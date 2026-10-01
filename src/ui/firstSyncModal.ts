@@ -24,19 +24,32 @@ export class FirstSyncModal extends Modal {
         private readonly folderName: string,
         private readonly conflictPolicy: string,
         private readonly onDecision: (start: boolean) => void,
+        /** The record of the last sync could not be read, so this is a first sync again. */
+        private readonly stateLost = false,
     ) {
         super(app);
     }
 
     override onOpen(): void {
         const { contentEl, plan } = this;
-        this.setTitle('Before the first sync');
+        this.setTitle(this.stateLost ? 'The sync history could not be read' : 'Before the first sync');
 
+        if (this.stateLost) {
+            contentEl.createEl('p', {
+                cls: 'proton-drive-sync-pin-warning',
+                text:
+                    'This device’s record of the last sync is damaged, for example by Obsidian closing while it ' +
+                    'was being saved, and could not be recovered. Without it, the plugin cannot tell an edit from ' +
+                    'a deletion: files deleted on one side since the last sync come back from the other, and files ' +
+                    'that differ are treated as conflicts. Check the lists below, and delete anything that should ' +
+                    'stay deleted once the sync has run.',
+            });
+        }
         contentEl.createEl('p', {
             text:
                 `This vault has ${plan.localFiles} file${plural(plan.localFiles)} and "${this.folderName}" on ` +
                 `Proton Drive has ${plan.remoteFiles}. Here is what syncing them will do. Nothing is deleted ` +
-                'on either side by a first sync.',
+                'on either side by this sync.',
         });
 
         const list = contentEl.createEl('ul', { cls: 'proton-drive-sync-plan' });

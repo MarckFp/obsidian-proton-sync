@@ -300,3 +300,53 @@ button.proton-drive-sync-diff-action.mod-added:hover {
     background-color: rgba(var(--color-orange-rgb), 0.1);
     font-size: var(--font-ui-small);
 }
+
+/* Current-note indicator: beside the status-bar icon, and in note headers on mobile */
+
+.proton-drive-sync-note-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-inline-start: var(--size-4-1);
+    border-radius: 50%;
+    vertical-align: middle;
+}
+
+.proton-drive-sync-note-action .proton-drive-sync-note-dot {
+    width: 10px;
+    height: 10px;
+    margin: 0;
+}
+
+.proton-drive-sync-note-dot.mod-synced {
+    background-color: var(--color-green);
+    animation: proton-drive-sync-pulse 2.4s ease-in-out infinite;
+}
+
+.proton-drive-sync-note-dot.mod-pending {
+    background-color: var(--color-red);
+    animation: proton-drive-sync-pulse 1.2s ease-in-out infinite;
+}
+
+.proton-drive-sync-note-dot.mod-excluded {
+    background-color: var(--text-faint);
+}
+
+@keyframes proton-drive-sync-pulse {
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    50% {
+        opacity: 0.45;
+        transform: scale(0.75);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .proton-drive-sync-note-dot.mod-synced,
+    .proton-drive-sync-note-dot.mod-pending {
+        animation: none;
+    }
+}

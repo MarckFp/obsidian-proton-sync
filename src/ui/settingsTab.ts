@@ -23,7 +23,8 @@ const CONFLICT_POLICY_HELP: Record<ConflictPolicy, string> = {
         'This device’s version keeps its filename; the other is saved beside it as a conflict copy. ' +
         'Both are synced everywhere, so nothing is lost.',
     merge:
-        'Combines edits made to different parts of a note, the usual case when a device has been offline. ' +
+        'Combines edits made to different parts of a note, even different words of the same line, the usual ' +
+        'case when a device has been offline. ' +
         'Needs the previous version, which is fetched from Drive’s revision history. ' +
         'Falls back to keeping both when the edits overlap, when the file is not text, or when the ' +
         'previous revision is no longer available.',
@@ -291,7 +292,10 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                 },
                 {
                     name: 'Sync on startup',
-                    desc: 'Compare the whole vault against Drive when Obsidian opens.',
+                    desc:
+                        'When Obsidian opens, catch up with what changed while it was closed, here and on Drive. ' +
+                        'Usually from Drive’s list of changes since the last session; the whole folder is compared ' +
+                        'when that is not enough, and at least once a day.',
                     control: { type: 'toggle', key: 'syncOnStartup' },
                 },
                 {
@@ -312,8 +316,11 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                     desc:
                         `Seconds between checks for changes from other devices (minimum ${MIN_POLL_SECONDS}). ` +
                         'Proton Drive has no push channel, so this interval is the delay before a change made ' +
-                        'elsewhere appears here. Proton rate-limits per account, and its guidelines ask ' +
-                        'third-party clients not to poll aggressively — lower this only if you need to.',
+                        'elsewhere appears here. It adapts around this value: twice as often for a few minutes ' +
+                        'after any change, here or elsewhere, and up to four times less often (at most every 5 ' +
+                        'minutes) when nothing has happened for a while or the window is hidden. Proton rate-limits ' +
+                        'per account, and its guidelines ask third-party clients not to poll aggressively — lower ' +
+                        'this only if you need to.',
                     aliases: ['poll', 'interval'],
                     control: {
                         type: 'number',
@@ -481,7 +488,9 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                 },
                 {
                     name: 'Simultaneous transfers',
-                    desc: 'Kept low on purpose: Proton rate-limits per account.',
+                    desc:
+                        'At most this many uploads and downloads at once. The plugin starts at two, goes up while ' +
+                        'Proton keeps up, and slows down on its own the moment Proton asks it to.',
                     aliases: ['concurrency'],
                     control: { type: 'slider', key: 'transferConcurrency', min: 1, max: 8, step: 1 },
                 },

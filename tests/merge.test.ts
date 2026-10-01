@@ -154,3 +154,33 @@ describe('mergeThreeWay — realistic note', () => {
         );
     });
 });
+
+describe('mergeThreeWay — edits to the same line', () => {
+    it('combines changes to different words of one line', () => {
+        assert.equal(
+            mergedText('The quick brown fox', 'The slow brown fox', 'The quick brown fox jumps'),
+            'The slow brown fox jumps',
+        );
+    });
+
+    it('combines a typo fixed on one device with a sentence added on the other, in one paragraph', () => {
+        const base = lines('# Plan', 'We shoud meet on Monday.', 'Bring notes.');
+        const local = lines('# Plan', 'We should meet on Monday.', 'Bring notes.');
+        const remote = lines('# Plan', 'We shoud meet on Monday. The room is booked.', 'Bring notes.');
+        assert.equal(
+            mergedText(base, local, remote),
+            lines('# Plan', 'We should meet on Monday. The room is booked.', 'Bring notes.'),
+        );
+    });
+
+    it('still refuses when both changed the same word differently', () => {
+        assert.equal(refusal('meet on Monday', 'meet on Tuesday', 'meet on Friday'), 'overlapping-edits');
+    });
+
+    it('keeps Windows line endings through a word-level merge', () => {
+        assert.equal(
+            mergedText('a\r\nthe old text\r\nz', 'a\r\nthe new text\r\nz', 'a\r\nthe old text here\r\nz'),
+            'a\r\nthe new text here\r\nz',
+        );
+    });
+});

@@ -1,4 +1,4 @@
-import { Platform, type App, type DataAdapter } from 'obsidian';
+import { Platform, TFile, type App, type DataAdapter, type TAbstractFile } from 'obsidian';
 
 import { sha1Hex } from '../util/hash';
 import type { Logger } from '../util/logger';
@@ -63,14 +63,15 @@ export type FileSink = {
 };
 
 /**
- * The vault side of the sync: listing, reading and writing files through
- * Obsidian's adapter.
+ * The vault side of the sync: listing, reading and writing files.
  *
- * Everything goes through `vault.adapter` rather than the higher-level
- * `Vault`/`TFile` API for two reasons: the adapter can see `.obsidian`, which
- * the file cache deliberately hides and which the user may want synced; and it
- * exposes mtime on both read and write, which the engine needs to write a
- * downloaded file with the modification time it had on the other device.
+ * Changes to files Obsidian indexes go through its Vault API, as Obsidian's
+ * plugin guidelines ask: it runs file operations one after another and keeps
+ * its cache in step, and deleting through `FileManager.trashFile` honours the
+ * user's "Deleted files" setting. Paths it does not index, the config folder
+ * and anything else whose name starts with a dot, go through the adapter, the
+ * only API that can reach them. Reads and listings use the adapter
+ * throughout, since only it sees those paths and reports mtimes.
  */
 export class VaultIO {
     private readonly adapter: DataAdapter;
@@ -89,10 +90,57 @@ export class VaultIO {
     private readonly selfWrites = new Map<string, number>();
 
     constructor(
-        app: App,
+        private readonly app: App,
         private readonly logger: Logger,
+        /**
+         * Where large downloads are written until complete: inside the
+         * plugin's own folder, which never syncs, so a download cut short by a
+         * crash leaves nothing in the vault and is swept at the next start;
+         * see {@link sweepDownloads}. Null puts them beside their target.
+         */
+        private readonly downloadsDir: string | null = null,
     ) {
         this.adapter = app.vault.adapter;
+    }
+
+    /** The file or folder at `path` as Obsidian indexes it, or null for a path it does not index. */
+    private indexed(path: string): TAbstractFile | null {
+        return this.app.vault.getAbstractFileByPath?.(path) ?? null;
+    }
+
+    /** Remove downloads left unfinished by an earlier run. */
+    async sweepDownloads(): Promise<void> {
+        if (this.downloadsDir === null || !(await this.adapter.exists(this.downloadsDir))) {
+            return;
+        }
+        try {
+            const listing = await this.adapter.list(this.downloadsDir);
+            for (const file of listing.files) {
+                await this.adapter.remove(file);
+            }
+            if (listing.files.length > 0) {
+                this.logger.info(`Removed ${listing.files.length} unfinished download(s) from an earlier session`);
+            }
+        } catch (error) {
+            this.logger.warn('Could not clear unfinished downloads', error);
+        }
+    }
+
+    /**
+     * Remove partial downloads left beside their targets by versions that
+     * wrote them there, among the files of a vault listing.
+     */
+    async removeLegacyPartialDownloads(files: string[]): Promise<void> {
+        for (const path of files) {
+            if (/^\.[^/]*\.proton-sync\.tmp$/.test(basename(path))) {
+                try {
+                    await this.adapter.remove(path);
+                    this.logger.info(`Removed "${path}", a download left unfinished by an older version`);
+                } catch (error) {
+                    this.logger.debug(`Could not remove "${path}"`, error);
+                }
+            }
+        }
     }
 
     /** True for a path we are writing, or one inside a folder we are moving. */
@@ -180,7 +228,12 @@ export class VaultIO {
         this.holdSelfWrite(toPath);
         try {
             await this.ensureFolder(parentPath(toPath));
-            await this.adapter.copy(fromPath, toPath);
+            const file = this.indexed(fromPath);
+            if (file instanceof TFile && !isHidden(toPath)) {
+                await this.app.vault.copy(file, toPath);
+            } else {
+                await this.adapter.copy(fromPath, toPath);
+            }
         } finally {
             this.releaseSelfWrite(toPath);
         }
@@ -282,7 +335,10 @@ export class VaultIO {
      */
     async openDownload(path: string): Promise<FileSink | null> {
         const target = this.fullPath(path);
-        const tempPath = joinPath(parentPath(path), `.${basename(path)}.proton-sync.tmp`);
+        const tempPath =
+            this.downloadsDir === null
+                ? joinPath(parentPath(path), `.${basename(path)}.proton-sync.tmp`)
+                : joinPath(this.downloadsDir, `${crypto.randomUUID()}.tmp`);
         const temp = this.fullPath(tempPath);
         if (!target || !temp) {
             return null;
@@ -290,6 +346,7 @@ export class VaultIO {
 
         const { fs, createHash } = nodeModules()!;
         await this.ensureFolder(parentPath(path));
+        await this.ensureFolder(parentPath(tempPath));
         const handle = await fs.open(temp, 'w');
         const digest = createHash('sha1');
         let size = 0;
@@ -322,7 +379,7 @@ export class VaultIO {
                     if (mtime !== undefined) {
                         await fs.utimes(temp, new Date(), new Date(mtime));
                     }
-                    await fs.rename(temp, target);
+                    await moveFile(fs, temp, target);
                     const stat = await this.adapter.stat(path);
                     return {
                         hash: digest.digest('hex'),
@@ -355,7 +412,13 @@ export class VaultIO {
         this.holdSelfWrite(toPath);
         try {
             await this.ensureFolder(parentPath(toPath));
-            await this.adapter.rename(fromPath, toPath);
+            // `Vault.rename`, unlike `FileManager.renameFile`, leaves links alone.
+            const file = this.indexed(fromPath);
+            if (file && !isHidden(toPath)) {
+                await this.app.vault.rename(file, toPath);
+            } else {
+                await this.adapter.rename(fromPath, toPath);
+            }
         } finally {
             this.releaseSelfWrite(fromPath);
             this.releaseSelfWrite(toPath);
@@ -378,7 +441,7 @@ export class VaultIO {
         this.holdSelfWrite(path);
         try {
             await this.ensureFolder(parentPath(path));
-            await this.adapter.writeBinary(path, data, mtime !== undefined ? { mtime } : undefined);
+            await this.writeThroughVault(path, data, mtime !== undefined ? { mtime } : undefined);
 
             const stat = await this.adapter.stat(path);
             return {
@@ -389,6 +452,30 @@ export class VaultIO {
         } finally {
             this.releaseSelfWrite(path);
         }
+    }
+
+    /**
+     * Write through the Vault API where Obsidian indexes the path, which
+     * serialises it with Obsidian's own file operations; through the adapter
+     * for paths it does not index. A file on disk that the index has not caught
+     * up with yet, which `createBinary` would refuse, also goes through the
+     * adapter.
+     */
+    private async writeThroughVault(path: string, data: ArrayBuffer, options?: { mtime: number }): Promise<void> {
+        const file = this.indexed(path);
+        if (file instanceof TFile) {
+            await this.app.vault.modifyBinary(file, data, options);
+            return;
+        }
+        if (!isHidden(path) && !file && !(await this.adapter.exists(path))) {
+            try {
+                await this.app.vault.createBinary(path, data, options);
+                return;
+            } catch (error) {
+                this.logger.debug(`Could not create "${path}" through the vault; writing it directly`, error);
+            }
+        }
+        await this.adapter.writeBinary(path, data, options);
     }
 
     async ensureFolder(path: string): Promise<void> {
@@ -410,16 +497,24 @@ export class VaultIO {
     }
 
     /**
-     * Delete a path, preferring the system trash.
+     * Delete a path, as a deletion arriving from another device.
      *
-     * A deletion arriving from another device is the one operation here the
-     * user cannot undo from within Obsidian, so it goes to the trash where the
-     * OS can still recover it. Falling back to a hard delete only when the
-     * vault has no trash available.
+     * A file Obsidian indexes goes where the user chose for deleted files, as
+     * if they had deleted it themselves. Anything else, such as a settings file
+     * in the config folder, goes to the system trash where the OS can still
+     * recover it, falling back to the vault's own trash, and to a hard delete
+     * only when neither is available.
      */
     async trash(path: string): Promise<void> {
         this.holdSelfWrite(path);
         try {
+            // Where Obsidian indexes it, the way the user chose in Files and
+            // links → Deleted files: system trash, the vault's .trash, or gone.
+            const file = this.indexed(path);
+            if (file) {
+                await this.app.fileManager.trashFile(file);
+                return;
+            }
             await this.adapter.trashSystem(path).then(async (trashed) => {
                 if (!trashed) {
                     await this.adapter.trashLocal(path);
@@ -515,4 +610,26 @@ function streamOf(data: ArrayBuffer): ReadableStream<Uint8Array> {
             controller.close();
         },
     });
+}
+
+/** Whether Obsidian leaves a path out of its index: anything inside a folder, or named, with a leading dot. */
+function isHidden(path: string): boolean {
+    return path.split('/').some((segment) => segment.startsWith('.'));
+}
+
+/**
+ * Move a finished download into place. A rename where it can be, which is
+ * atomic; a copy and delete when the temporary file sits on another
+ * filesystem than the target, as a vault folder that is a link elsewhere can.
+ */
+async function moveFile(fs: DesktopModules['fs'], from: string, to: string): Promise<void> {
+    try {
+        await fs.rename(from, to);
+    } catch (error) {
+        if ((error as { code?: string }).code !== 'EXDEV') {
+            throw error;
+        }
+        await fs.copyFile(from, to);
+        await fs.unlink(from);
+    }
 }

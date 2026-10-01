@@ -83,3 +83,43 @@ describe('VaultIO on desktop', () => {
         );
     });
 });
+
+describe('VaultIO — unfinished downloads (issue #6)', () => {
+    const disk = diskVault();
+    const DOWNLOADS = '.obsidian/plugins/proton-drive-sync/downloads';
+    let vault: VaultIO;
+
+    before(() => {
+        exposeNodeRequire();
+        vault = new VaultIO(disk.app, SILENT, DOWNLOADS);
+    });
+    after(() => disk.cleanup());
+
+    it('writes a download in progress to the plugin’s folder, not beside its target', async () => {
+        const file = await vault.openDownload('media/talk.mp4');
+        const writer = file!.sink.getWriter();
+        await writer.write(new TextEncoder().encode('partial'));
+
+        assert.equal(readdirSync(disk.full(DOWNLOADS)).length, 1);
+        assert.deepEqual(readdirSync(disk.full('media')), []);
+
+        await writer.close();
+        await file!.commit();
+        assert.equal(readFileSync(disk.full('media/talk.mp4'), 'utf8'), 'partial');
+        assert.deepEqual(readdirSync(disk.full(DOWNLOADS)), []);
+    });
+
+    it('clears downloads a crash left unfinished', async () => {
+        writeFileSync(disk.full(`${DOWNLOADS}/left-behind.tmp`), 'half a video');
+        await vault.sweepDownloads();
+        assert.deepEqual(readdirSync(disk.full(DOWNLOADS)), []);
+    });
+
+    it('removes partial downloads older versions left beside their targets', async () => {
+        writeFileSync(disk.full('.big.mov.proton-sync.tmp'), 'half');
+        writeFileSync(disk.full('keep.tmp'), 'not ours');
+        await vault.removeLegacyPartialDownloads(['.big.mov.proton-sync.tmp', 'keep.tmp']);
+        assert.equal(existsSync(disk.full('.big.mov.proton-sync.tmp')), false);
+        assert.equal(existsSync(disk.full('keep.tmp')), true);
+    });
+});

@@ -359,6 +359,21 @@ export class DriveIO {
         return start === -1 || end <= start ? [] : revisions.slice(start + 1, end);
     }
 
+    /**
+     * The newest revision of a node, asked of Drive itself. Revision listings
+     * are not served from the SDK's cache, so this sees an upload another
+     * device made a moment ago, which a cached node would not.
+     */
+    async latestRevisionUid(nodeUid: string): Promise<string | null> {
+        let latest: Revision | null = null;
+        for await (const revision of this.client.iterateRevisions(nodeUid)) {
+            if (!latest || revision.creationTime.getTime() >= latest.creationTime.getTime()) {
+                latest = revision;
+            }
+        }
+        return latest?.uid ?? null;
+    }
+
     async trashNode(nodeUid: string): Promise<void> {
         for await (const result of this.client.trashNodes([nodeUid])) {
             if (!result.ok) {

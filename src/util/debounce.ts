@@ -44,6 +44,11 @@ export class PathBatcher {
         }
     }
 
+    /** Paths waiting to be handed over. */
+    pendingPaths(): string[] {
+        return [...this.pending];
+    }
+
     /** Hand over whatever is pending right now. */
     flush(): void {
         if (this.timer !== null) {

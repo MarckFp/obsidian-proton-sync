@@ -66,3 +66,28 @@ describe('Limiter', () => {
         assert.equal(await limiter.run(async () => 'next'), 'next');
     });
 });
+
+describe('Limiter with a changing limit', () => {
+    it('lets more through when the limit rises, without breaking the queue order', async () => {
+        let limit = 1;
+        const limiter = new Limiter(() => limit);
+        let active = 0;
+        let peak = 0;
+        const started: number[] = [];
+        const tasks = Array.from({ length: 6 }, (_, i) =>
+            limiter.run(async () => {
+                started.push(i);
+                active++;
+                peak = Math.max(peak, active);
+                if (i === 0) {
+                    limit = 3;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 3));
+                active--;
+            }),
+        );
+        await Promise.all(tasks);
+        assert.deepEqual(started, [0, 1, 2, 3, 4, 5]);
+        assert.equal(peak, 3);
+    });
+});

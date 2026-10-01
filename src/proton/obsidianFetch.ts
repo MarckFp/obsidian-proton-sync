@@ -1,5 +1,7 @@
 import { requestUrl, type RequestUrlParam } from 'obsidian';
 
+import { requestStats } from '../util/requestStats';
+
 /**
  * A `fetch`-compatible function backed by Obsidian's `requestUrl`.
  *
@@ -40,6 +42,7 @@ export async function obsidianFetch(input: RequestInfo | URL, init?: RequestInit
     }
 
     const response = await requestUrl(params);
+    requestStats.record(response.status);
 
     // `requestUrl` lowercases header names and omits the status text. Neither
     // matters to the callers here, which read status codes and JSON bodies.

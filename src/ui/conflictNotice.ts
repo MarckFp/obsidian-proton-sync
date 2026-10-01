@@ -51,7 +51,7 @@ export function showConflictNotice(app: App, events: ConflictEvent[], actions: C
             }
             item.appendText(`: ${REASON_TEXT[event.reason]}; ${outcomeText(event)}.`);
             const { copyPath } = event;
-            if (copyPath && isTextPath(event.path) && app.vault.getFileByPath(copyPath)) {
+            if (event.outcome === 'kept-both' && copyPath && isTextPath(event.path) && app.vault.getFileByPath(copyPath)) {
                 item.appendText(' ');
                 const compare = item.createEl('a', { text: 'Compare', href: '#' });
                 compare.addEventListener('click', (click) => {

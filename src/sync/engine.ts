@@ -11,9 +11,22 @@ import { MIN_POLL_SECONDS, type PluginSettings } from '../settings';
 import { PathBatcher } from '../util/debounce';
 import type { Logger } from '../util/logger';
 import { Limiter, runPooled } from '../util/pool';
-import { ConflictResolver } from './conflicts';
+import { requestStats } from '../util/requestStats';
+import { ConflictResolver, MAX_MERGE_BYTES } from './conflicts';
+import { isTextPath } from './media';
+import { mergeThreeWay } from './merge';
 import { DriveIO, type NodeLocation, type RemoteTree, type UploadSource } from './drive';
-import { basename, conflictCopyPath, isWithin, PathFilter, parentPath, replacePrefix, splitExtension } from './paths';
+import {
+    ancestorPaths,
+    basename,
+    conflictCopyPath,
+    isWithin,
+    joinPath,
+    PathFilter,
+    parentPath,
+    replacePrefix,
+    splitExtension,
+} from './paths';
 import { reconcile } from './reconcile';
 import type { SyncState } from './state';
 import type { ConflictPolicy, ConflictReason, LocalState, RemoteState, SyncAction, SyncBase } from './types';
@@ -47,11 +60,28 @@ export type SyncSummary = {
     conflicts: number;
     uploaded: number;
     downloaded: number;
+    /** Paths not in sync right now, for whatever reason; see {@link SyncEngine.pendingChanges}. */
+    pending: number;
     /** Files handled so far in the current pass, when it covers more than one. */
     progress: { done: number; total: number } | null;
     /** The largest transfer in flight, if any is large enough to report. */
     transfer: TransferProgress | null;
 };
+
+/** Why a path is not in sync right now. */
+export type PendingReason =
+    | 'transferring'
+    | 'waiting'
+    | 'wifi'
+    | 'retrying'
+    | 'too-large'
+    | 'name-clash'
+    | 'conflict';
+
+export type PendingChange = { path: string; reason: PendingReason; detail?: string };
+
+/** One note's standing, for the current-note indicator. */
+export type NoteSyncState = 'synced' | 'pending' | 'excluded';
 
 /** What a first sync would do, worked out without touching either side. */
 export type SyncPlan = {
@@ -76,17 +106,46 @@ export type SyncPlan = {
     unchanged: number;
 };
 
+/**
+ * A note open in an editor, as the engine needs it: its text as shown, which
+ * may hold typing not yet saved, and a way to change it in place.
+ */
+export type OpenEditor = {
+    text(): string;
+    /** Replace the text, as a minimal edit so the cursor and scroll position stay put. */
+    replace(text: string): void;
+};
+
 /** What the engine needs to know about the device it runs on. */
 export type EngineEnvironment = {
     isMobile: boolean;
+    /**
+     * Whether the vault's filesystem treats names differing only in letter
+     * case as one (Windows, macOS, iOS, usually Android). Probed from the vault
+     * when not given.
+     */
+    caseInsensitive?: boolean;
     /** Whether the connection is known to be cellular. */
     isMetered: () => boolean;
+    /** Whether Obsidian's window is hidden, minimised or in the background; Drive is then checked less often. */
+    isHidden?: () => boolean;
+    /** The editor showing a note, if one is open; see {@link SyncEngine.downloadIntoEditor}. */
+    openEditor?: (path: string) => OpenEditor | null;
 };
 
 const DESKTOP: EngineEnvironment = { isMobile: false, isMetered: () => false };
 
 /** How a conflict ended, for telling the user about it. */
-export type ConflictOutcome = 'kept-both' | 'merged' | 'kept-local' | 'kept-remote' | 'deferred';
+export type ConflictOutcome =
+    | 'kept-both'
+    | 'merged'
+    | 'kept-local'
+    | 'kept-remote'
+    | 'deferred'
+    /** A name clash settled by renaming the other file on Drive; `copyPath` is its new name. */
+    | 'renamed'
+    /** Left alone, not synced until one of the two is renamed. */
+    | 'not-synced';
 
 export type ConflictEvent = {
     path: string;
@@ -150,6 +209,71 @@ const PROGRESS_MIN_BYTES = 1024 * 1024;
 /** Progress updates are coalesced to at most one per this interval. */
 const CHANGE_THROTTLE_MS = 250;
 
+/**
+ * A full sync, walking the whole Drive folder, runs at least this often even
+ * when start-up can catch up from the event feed instead; a safety net for
+ * anything the events and the local scan could miss.
+ */
+const FULL_SYNC_INTERVAL_MS = 24 * 60 * 60_000;
+
+/**
+ * How Drive is polled around the base interval the user set. For a while
+ * after anything changed, here or on Drive, another device is likely active
+ * and changes are checked for twice as often (never below the minimum); after
+ * a long quiet spell, or while the window is hidden, four times less often,
+ * capped. Fewer requests overall, and faster when it matters.
+ */
+const ACTIVE_WINDOW_MS = 3 * 60_000;
+const IDLE_AFTER_MS = 10 * 60_000;
+const IDLE_POLL_FACTOR = 4;
+const MAX_IDLE_POLL_SECONDS = 5 * 60;
+
+/**
+ * Transfers run at a pace found as they go, up to the user's setting: a pass
+ * starts at a couple at a time, adds one after every few that finish, and
+ * halves the moment Proton answers "too many requests", climbing again only
+ * after a cool-down. Big syncs get fast without anyone tuning a number, and
+ * back off on their own when Proton asks.
+ */
+const START_TRANSFERS = 2;
+const RAMP_EVERY = 4;
+const RATE_LIMIT_COOLDOWN_MS = 60_000;
+
+/** How many times a path is decided again when its file changes under a transfer, before it waits for the next pass. */
+const MAX_REDECIDE = 3;
+
+/** The local file changed between the decision and the step that would have replaced or deleted it. */
+class LocalChangedError extends Error {
+    constructor(path: string) {
+        super(`"${path}" changed here while it was being synced; deciding again`);
+        this.name = 'LocalChangedError';
+    }
+}
+
+/**
+ * A download for a note with unsaved typing in its editor was merged into the
+ * editor, or left for the conflict policy, instead of written to disk. The
+ * path is decided again once the editor has saved.
+ */
+class EditorBusyError extends Error {
+    constructor(path: string, merged: boolean) {
+        super(
+            merged
+                ? `Merged the version of "${path}" from Drive into the open editor; it syncs once saved`
+                : `"${path}" has unsaved edits that overlap the version from Drive; deciding again once saved`,
+        );
+        this.name = 'EditorBusyError';
+    }
+}
+
+/** The Drive file moved on to a new revision between the decision and trashing it. */
+class RemoteChangedError extends Error {
+    constructor(path: string) {
+        super(`"${path}" was changed on Drive since this pass looked; not removing it`);
+        this.name = 'RemoteChangedError';
+    }
+}
+
 /** Transferred first, so a first sync is usable long before the attachments arrive. */
 const NOTE_EXTENSIONS = new Set(['.md', '.canvas', '.base', '.txt']);
 
@@ -188,6 +312,26 @@ export class SyncEngine {
     private progress: { done: number; total: number } | null = null;
     private readonly transfers = new Map<symbol, TransferProgress>();
     private changeTimer: number | null = null;
+    /** Paths with a transfer under way. */
+    private readonly inFlight = new Set<string>();
+    /**
+     * Drive revisions merged into an open editor, by path. When the editor
+     * saves, the note differs from its base on both sides, which reads as a
+     * conflict; but the local text already holds that revision's changes, so
+     * it is simply uploaded. See {@link downloadIntoEditor}.
+     */
+    private readonly mergedIntoEditor = new Map<string, string>();
+    /** Paths left alone for being over a size limit, with their size. */
+    private readonly tooLarge = new Map<string, number>();
+    /** Transfers allowed at once right now; see {@link START_TRANSFERS}. */
+    private transferLimit: number;
+    private transfersSinceRamp = 0;
+    /** The rate-limit answer the transfer limit last reacted to. */
+    private rateLimitSeen: number | null = requestStats.lastRateLimited();
+    /** Last time anything changed, here or on Drive; drives the polling rate. 0 for never. */
+    private lastActivityAt = 0;
+    /** When the scheduled poll is due, in epoch ms. */
+    private pollDueAt = 0;
     /** What {@link updateSettings} compares against to spot a change of scope. */
     private scopeKey: string;
     /**
@@ -205,6 +349,10 @@ export class SyncEngine {
      * settings files only come down, never go up, for the rest of the session.
      */
     private settingsHeld = false;
+    /** Probed once; see {@link isCaseInsensitive}. */
+    private caseInsensitive: boolean | null = null;
+    /** Case clashes already reported in this session, so a full sync does not repeat the notice. */
+    private readonly reportedCaseClashes = new Set<string>();
 
     private queue: Promise<void> = Promise.resolve();
     private pollTimer: number | null = null;
@@ -219,13 +367,12 @@ export class SyncEngine {
     private readonly policyOverrides = new Map<string, ConflictPolicy>();
     /** Folders deleted locally, whose Drive counterpart is removed once their files have been. */
     private readonly pendingFolderDeletes = new Set<string>();
-
     /**
-     * Paths a remote-event pass could not settle - a lookup failed, or the
-     * transfer did - retried with the next poll. The event cursor moves on
-     * regardless, so without this they would wait for the next full sync.
+     * Paths this pass queued for a retry without failing, a Drive revision
+     * that moved under it, say; so finishing the pass does not clear what it
+     * just queued.
      */
-    private readonly retryPaths = new Set<string>();
+    private readonly heldForRetry = new Set<string>();
 
     /**
      * Paths that differ from another path only in letter case, found by the
@@ -245,9 +392,14 @@ export class SyncEngine {
         private readonly scope: VaultScope,
         private readonly environment: EngineEnvironment = DESKTOP,
     ) {
-        this.vault = new VaultIO(app, logger.getLogger('vault'));
+        this.vault = new VaultIO(
+            app,
+            logger.getLogger('vault'),
+            scope.pluginDir === null ? null : `${scope.pluginDir}/downloads`,
+        );
         this.filter = this.createFilter(settings);
         this.scopeKey = scopeKeyOf(settings);
+        this.transferLimit = Math.min(START_TRANSFERS, Math.max(1, settings.transferConcurrency));
         this.batcher = new PathBatcher(settings.uploadDebounceMs, MAX_BATCH_WAIT_MS, (paths) => {
             void this.enqueue(() => this.processPaths(new Set(paths)));
         });
@@ -263,7 +415,70 @@ export class SyncEngine {
             downloaded: this.downloaded,
             progress: this.progress ? { ...this.progress } : null,
             transfer: this.largestTransfer(),
+            pending: this.pendingChanges().length,
         };
+    }
+
+    /**
+     * Every path that is not in sync right now, and why: what the panel lists
+     * under "Not synced yet", so that nothing fails to sync without the user
+     * being able to see it. A path is listed once, under the most immediate
+     * reason.
+     */
+    pendingChanges(now = Date.now()): PendingChange[] {
+        const found = new Map<string, PendingChange>();
+        const add = (path: string, reason: PendingReason, detail?: string) => {
+            if (!found.has(path)) {
+                found.set(path, { path, reason, ...(detail !== undefined && { detail }) });
+            }
+        };
+        const held = this.networkHeld();
+        for (const path of this.inFlight) {
+            add(path, 'transferring');
+        }
+        for (const { path } of this.state.conflicts()) {
+            add(path, 'conflict');
+        }
+        for (const retry of this.state.retryEntries()) {
+            if (held) {
+                add(retry.path, 'wifi');
+            } else if (retry.attempts === 0) {
+                add(retry.path, 'waiting');
+            } else {
+                const next = retry.after <= now ? 'with the next check' : `in ${formatWait(retry.after - now)}`;
+                add(retry.path, 'retrying', `failed ${retry.attempts} time${retry.attempts === 1 ? '' : 's'}; next try ${next}`);
+            }
+        }
+        for (const path of this.batcher.pendingPaths()) {
+            add(path, held ? 'wifi' : 'waiting');
+        }
+        for (const [path, bytes] of this.tooLarge) {
+            add(path, 'too-large', `${megabytes(bytes)} MB`);
+        }
+        for (const path of this.caseCollisions) {
+            add(path, 'name-clash');
+        }
+        return [...found.values()].sort((a, b) => a.path.localeCompare(b.path));
+    }
+
+    /**
+     * Whether one note is in sync, for the current-note indicator. `stat` is
+     * the file's size and mtime as the vault reports them now; a note whose
+     * file no longer matches what the last sync recorded has changes not yet
+     * synced, even if nothing has queued them (while paused, say).
+     */
+    noteSyncState(path: string, stat: { size: number; mtime: number } | null): NoteSyncState {
+        if (this.filter.isExcludedWithAncestors(path)) {
+            return 'excluded';
+        }
+        if (this.pendingChanges().some((change) => change.path === path)) {
+            return 'pending';
+        }
+        const base = this.state.get(path)?.base;
+        if (!base || (stat !== null && (stat.size !== base.size || stat.mtime !== base.localMtime))) {
+            return 'pending';
+        }
+        return 'synced';
     }
 
     isPaused(): boolean {
@@ -295,6 +510,9 @@ export class SyncEngine {
         this.running = true;
         this.paused = this.settings.paused;
         this.abortController = new AbortController();
+        // Nothing is downloading yet, so anything left in there is from a run
+        // that ended mid-download.
+        await this.vault.sweepDownloads();
 
         if (this.paused) {
             // Nothing runs until resume, which starts with a full sync and so
@@ -303,7 +521,7 @@ export class SyncEngine {
             return;
         }
         if (this.settings.syncOnStartup) {
-            await this.syncNow();
+            await this.enqueue(() => this.startupSync());
         } else {
             // The event scope is only known once the root node has been read,
             // and without it there is nothing to poll.
@@ -330,7 +548,6 @@ export class SyncEngine {
         }
         this.pendingRenames = [];
         this.pendingFolderDeletes.clear();
-        this.retryPaths.clear();
         this.plannedLocal.clear();
         this.deferredFullSync = false;
         this.abortController?.abort();
@@ -427,6 +644,7 @@ export class SyncEngine {
             return;
         }
         this.batcher.add(path);
+        this.noteActivity();
     }
 
     onVaultFolderDelete(path: string): void {
@@ -514,9 +732,6 @@ export class SyncEngine {
 
         this.setStatus('syncing');
         try {
-            // A full pass settles everything, including what earlier polls
-            // could not.
-            this.retryPaths.clear();
             this.adoptingSettings = this.state.paths().length === 0 ? [] : null;
 
             // Where the event feed stands, taken before the listing, so that
@@ -547,7 +762,12 @@ export class SyncEngine {
             const { skip, goneFolders } = await this.verifyMissingNodes(tree);
 
             const local = await this.vault.list((path) => !this.filter.isExcluded(path));
+            await this.vault.removeLegacyPartialDownloads(local.files);
+            await this.settleTreeCaseClashes(tree, local);
             const locallyDeletedFolders = await this.syncFolders(local.folders, tree, goneFolders);
+            // Renames this device made but never carried to Drive: paused,
+            // locked, closed too soon, or made outside Obsidian altogether.
+            await this.followLocalRenames(local.files, tree);
 
             const paths = new Set<string>();
             for (const path of local.files) {
@@ -568,7 +788,8 @@ export class SyncEngine {
                 }
             }
 
-            this.caseCollisions = this.findCaseCollisions(paths);
+            this.caseCollisions = (await this.isCaseInsensitive()) ? this.findCaseCollisions(paths) : new Set();
+            const failed: string[] = [];
             if (this.adoptingSettings) {
                 // A first sync settles the config folder before anything
                 // else. Obsidian needs a reload to apply settings, plugins and
@@ -578,16 +799,30 @@ export class SyncEngine {
                 // state is saved first, so a reload loses none of it; the
                 // notes then continue, or resume after the reload.
                 const settingsPaths = new Set([...paths].filter((path) => this.filter.isConfigPath(path)));
-                await this.reconcileAll(settingsPaths, tree.files, skip);
+                failed.push(...(await this.reconcileAll(settingsPaths, tree.files, skip)));
                 await this.state.flush();
                 this.announceAdoptedSettings();
                 for (const path of settingsPaths) {
                     paths.delete(path);
                 }
             }
-            await this.reconcileAll(paths, tree.files, skip);
+            failed.push(...(await this.reconcileAll(paths, tree.files, skip)));
             await this.cleanUpDeletedFolders(goneFolders, locallyDeletedFolders);
             this.plannedLocal.clear();
+
+            // A full pass settles everything earlier polls could not, so only
+            // what failed in it, or could not be established, stays queued.
+            this.state.clearRetries();
+            for (const path of [...failed, ...skip]) {
+                this.state.retry(path);
+            }
+            // Queued during this pass without failing, a Drive revision that
+            // moved under it, say: still to be retried.
+            for (const path of this.heldForRetry) {
+                this.state.retry(path, { backoff: false });
+            }
+            this.heldForRetry.clear();
+            this.state.setLastFullSync(Date.now());
 
             this.lastSyncedAt = Date.now();
             this.lastError = null;
@@ -598,6 +833,107 @@ export class SyncEngine {
             this.adoptingSettings = null;
             await this.state.flush();
         }
+    }
+
+    /**
+     * Sync on start-up, from where the last session left off when it can.
+     *
+     * Walking the whole Drive folder on every launch costs a request per
+     * folder, slows the first sync on a phone, and is the pattern Proton's
+     * guidelines ask third-party clients to avoid. When the saved state is
+     * usable it is not needed: Drive's event feed, read from the saved cursor,
+     * lists every remote change since, and a scan of the vault, which costs
+     * only local stats, finds every local one. The full walk is kept for when
+     * those two cannot tell the whole story: no state or cursor yet, the event
+     * feed not being followed (Auto sync off), a recorded file or folder gone
+     * from the vault (a rename or deletion made while Obsidian was closed,
+     * which the walk's rename detection handles), a new folder, and once a day
+     * regardless. If Drive can no longer replay from the cursor, it says so
+     * with a TreeRefresh event and the poll falls back to the walk.
+     */
+    private async startupSync(): Promise<void> {
+        const drive = this.drive;
+        const rootUid = this.rootUid;
+        const lastFull = this.state.getLastFullSync();
+        if (
+            !drive ||
+            !rootUid ||
+            this.state.paths().length === 0 ||
+            !this.settings.autoSync ||
+            this.networkHeld() ||
+            lastFull === null ||
+            Date.now() - lastFull > FULL_SYNC_INTERVAL_MS
+        ) {
+            return this.fullSync();
+        }
+
+        let scopeId: string;
+        try {
+            scopeId = (await drive.getNode(rootUid)).treeEventScopeId;
+        } catch {
+            // Let the full sync report it, and set the status to match.
+            return this.fullSync();
+        }
+        if (this.state.getEventCursor(scopeId) === null) {
+            return this.fullSync();
+        }
+
+        const scan = await this.scanLocalChanges();
+        if (scan === null) {
+            return this.fullSync();
+        }
+        this.logger.info(`Catching up from the last session: ${scan.size} local change(s), then Drive's events`);
+        this.treeEventScopeId = scopeId;
+        this.folderUids.set('', rootUid);
+
+        if (scan.size > 0) {
+            await this.processPaths(scan);
+        }
+        await this.pollRemoteEvents();
+        // Caught up, unless one of the steps reported a problem in the status.
+        if (this.status === 'syncing' || this.status === 'idle') {
+            this.lastSyncedAt = Date.now();
+            this.lastError = null;
+            this.setStatus('idle');
+        }
+    }
+
+    /**
+     * Local files that changed since their last sync, by size and mtime, or
+     * null when the vault changed in a way only a full sync handles: a
+     * recorded file or folder gone, or a folder with no record.
+     */
+    private async scanLocalChanges(): Promise<Set<string> | null> {
+        const included = (path: string) => !this.filter.isExcludedWithAncestors(path);
+        const local = await this.vault.list((path) => !this.filter.isExcluded(path));
+        const files = local.files.filter(included);
+        const present = new Set([...files, ...local.folders]);
+
+        for (const record of this.state.entries()) {
+            if (!present.has(record.path) && included(record.path)) {
+                return null;
+            }
+        }
+        if (local.folders.some((folder) => included(folder) && this.state.get(folder)?.type !== 'folder')) {
+            return null;
+        }
+
+        const changed = new Set<string>();
+        await runPooled(
+            files.map((path) => async () => {
+                const base = this.state.get(path)?.base;
+                const stat = await this.vault.stat(path);
+                if (!base || !stat || stat.size !== base.size || stat.mtime !== base.localMtime) {
+                    changed.add(path);
+                }
+            }),
+            SCAN_CONCURRENCY,
+            (error, index) => {
+                this.logger.debug(`Could not check "${files[index]}"`, error);
+                changed.add(files[index]);
+            },
+        );
+        return changed;
     }
 
     /**
@@ -613,10 +949,14 @@ export class SyncEngine {
         }
         if (this.networkHeld()) {
             for (const path of paths) {
-                this.retryPaths.add(path);
+                this.state.retry(path, { backoff: false });
             }
             this.setStatus('waiting-for-wifi');
             return;
+        }
+
+        if (await this.isCaseInsensitive()) {
+            paths = await this.settleCaseClashesIn(paths);
         }
 
         this.setStatus('syncing');
@@ -627,10 +967,15 @@ export class SyncEngine {
                 ),
             );
             const view = await this.lookupRemote(files, confirmedAbsent);
-            const failed = await this.reconcileAll(view.paths, view.states, view.skip);
-            for (const path of [...view.skip, ...failed]) {
-                this.retryPaths.add(path);
+            const failed = new Set(await this.reconcileAll(view.paths, view.states, view.skip));
+            for (const path of new Set([...paths, ...view.paths])) {
+                if (failed.has(path) || view.skip.has(path)) {
+                    this.state.retry(path);
+                } else if (!this.heldForRetry.has(path)) {
+                    this.state.clearRetry(path);
+                }
             }
+            this.heldForRetry.clear();
             await this.applyLocalFolderDeletes();
 
             this.lastSyncedAt = Date.now();
@@ -638,7 +983,7 @@ export class SyncEngine {
             this.setStatus('idle');
         } catch (error) {
             for (const path of paths) {
-                this.retryPaths.add(path);
+                this.state.retry(path);
             }
             this.reportFailure('Sync failed', error);
         } finally {
@@ -666,7 +1011,7 @@ export class SyncEngine {
             this.logger.debug(`Leaving "${path}" alone: could not confirm its state on Drive`);
         }
 
-        const transfers = new Limiter(this.settings.transferConcurrency);
+        const transfers = new Limiter(() => this.transferLimit);
         const limit = this.sizeLimitBytes();
         this.progress = ordered.length > 1 ? { done: 0, total: ordered.length } : null;
 
@@ -697,14 +1042,43 @@ export class SyncEngine {
                         await this.applyAction(path, decision.action, decision.local, decision.remote);
                         return;
                     }
-                    // `run` claims its place synchronously, so the next path
-                    // may go as soon as it has been called.
-                    const transfer = transfers.run(async () => {
+                    const transferOne = async () => {
                         if (decision && (await this.localMoved(path, decision.local))) {
                             decision = await this.decide(path, remoteStates.get(path), limit);
                         }
-                        if (decision) {
-                            await this.applyAction(path, decision.action, decision.local, decision.remote);
+                        for (let attempt = 1; decision; attempt++) {
+                            try {
+                                await this.applyAction(path, decision.action, decision.local, decision.remote);
+                                return;
+                            } catch (error) {
+                                if (error instanceof RemoteChangedError || error instanceof EditorBusyError) {
+                                    // Decided against a version of the Drive
+                                    // file that is no longer current; the
+                                    // event for the new one brings it back.
+                                    this.logger.info(error.message);
+                                    this.state.retry(path, { backoff: false });
+                                    this.heldForRetry.add(path);
+                                    return;
+                                }
+                                if (!(error instanceof LocalChangedError) || attempt >= MAX_REDECIDE) {
+                                    throw error;
+                                }
+                                // Saved again while the transfer ran: decide
+                                // afresh, which usually makes it a conflict.
+                                this.logger.info(error.message);
+                                decision = await this.decide(path, remoteStates.get(path), limit);
+                            }
+                        }
+                    };
+                    // `run` claims its place synchronously, so the next path
+                    // may go as soon as it has been called.
+                    const transfer = transfers.run(async () => {
+                        this.inFlight.add(path);
+                        try {
+                            await transferOne();
+                        } finally {
+                            this.inFlight.delete(path);
+                            this.adjustTransferLimit();
                         }
                     });
                     markQueued();
@@ -745,6 +1119,7 @@ export class SyncEngine {
         const local = await this.vault.getState(path, known);
         if (local && local.size > limit) {
             this.logger.info(`Skipping "${path}": ${megabytes(local.size)} MB exceeds the configured limit`);
+            this.tooLarge.set(path, local.size);
             return null;
         }
 
@@ -756,8 +1131,10 @@ export class SyncEngine {
         });
         if (remote?.size !== undefined && remote.size > limit && (action.type === 'download' || action.type === 'conflict')) {
             this.logger.info(`Leaving "${path}" on Drive: ${megabytes(remote.size)} MB exceeds this device's limit`);
+            this.tooLarge.set(path, remote.size);
             return null;
         }
+        this.tooLarge.delete(path);
         if (
             this.settingsHeld &&
             this.filter.isConfigPath(path) &&
@@ -815,16 +1192,22 @@ export class SyncEngine {
                 return;
 
             case 'download':
-                await this.download(path, action.nodeUid, action.revisionUid, remote);
+                await this.download(path, action.nodeUid, action.revisionUid, remote, local);
                 return;
 
             case 'delete-local':
+                // Checked again right before the delete: an edit saved since
+                // the decision turns this into a conflict, which keeps it.
+                if (await this.localMoved(path, local)) {
+                    throw new LocalChangedError(path);
+                }
                 this.logger.info(`Removing "${path}", deleted on another device`);
                 await this.vault.trash(path);
                 this.state.delete(path);
                 return;
 
             case 'delete-remote':
+                await this.assertRemoteUnchanged(path, action.nodeUid);
                 this.logger.info(`Removing "${path}" from Drive, deleted locally`);
                 await this.drive!.trashNode(action.nodeUid);
                 this.state.delete(path);
@@ -866,6 +1249,17 @@ export class SyncEngine {
         if (nodeUid) {
             const previousRevision = remote?.revisionUid ?? record?.base?.remoteRevisionUid;
             const previousHash = record?.base?.hash;
+            // Drive cannot refuse an upload because another one just landed,
+            // so ask first: if another device uploaded since this decision,
+            // decide again, which merges or keeps both, instead of uploading
+            // over its edit and rescuing it afterwards. The rescue below stays
+            // for an upload that lands in the moment between.
+            if (previousRevision !== undefined) {
+                const latest = await drive.latestRevisionUid(nodeUid);
+                if (latest !== null && latest !== previousRevision) {
+                    throw new RemoteChangedError(path);
+                }
+            }
             const result = await drive.uploadRevision(nodeUid, source, signal, onProgress);
             this.uploaded++;
             this.state.setSynced(path, result.nodeUid, 'file', baseOf(local, result.revisionUid));
@@ -939,7 +1333,7 @@ export class SyncEngine {
 
         const copyPath = await this.availablePath(conflictCopyPath(path, this.settings.deviceName, new Date()));
         this.logger.warn(`"${path}" was saved on another device during this upload; keeping that version as "${copyPath}"`);
-        await this.fetchInto(copyPath, { revisionUid: lost.uid }, lost.claimedSize, lost.claimedModificationTime?.getTime());
+        await this.fetchInto(copyPath, lost.uid, lost.claimedSize, lost.claimedModificationTime?.getTime(), undefined);
         await this.uploadAsNewFile(copyPath);
         this.reportConflict({ path, reason: 'both-modified', outcome: 'kept-both', copyPath });
     }
@@ -954,13 +1348,27 @@ export class SyncEngine {
         this.state.setSynced(path, result.nodeUid, 'file', baseOf(local, result.revisionUid));
     }
 
+    /**
+     * Download the revision the decision was made on, not whatever is active
+     * by the time the transfer starts: the bytes, their timestamp and the
+     * revision recorded as the new base then all describe the same version,
+     * and a newer one is an ordinary remote change for the next pass.
+     * `local` is what the decision saw here; see {@link fetchInto}.
+     */
     private async download(
         path: string,
         nodeUid: string,
         revisionUid: string,
         remote: RemoteState | undefined,
+        local: LocalState | undefined,
     ): Promise<void> {
-        const written = await this.fetchInto(path, { nodeUid }, remote?.size, remote?.mtime);
+        const editor =
+            isTextPath(path) && (remote?.size ?? 0) <= MAX_MERGE_BYTES ? (this.environment.openEditor?.(path) ?? null) : null;
+        if (editor) {
+            await this.downloadIntoEditor(path, editor, nodeUid, revisionUid, remote, local);
+            return;
+        }
+        const written = await this.fetchInto(path, revisionUid, remote?.size, remote?.mtime, local);
         this.downloaded++;
         this.state.setSynced(path, nodeUid, 'file', baseOf(written, revisionUid));
         if (this.adoptingSettings && this.filter.isConfigPath(path)) {
@@ -981,11 +1389,76 @@ export class SyncEngine {
      * which lets Obsidian's adapter do the write and keeps the file cache in
      * step.
      */
+    /**
+     * Bring a new version of a note into the editor it is open in.
+     *
+     * Writing the file underneath an open editor races Obsidian's own save of
+     * what is being typed: whichever lands last wins, and the other is lost
+     * without a conflict. So with nothing unsaved, the editor is given the new
+     * text first, as an edit that keeps the cursor where it was, and then the
+     * file is written. With unsaved typing, nothing is written: the new version
+     * is merged into the editor three ways (the file on disk the typing
+     * started from, the editor's text, and Drive's), and once Obsidian saves
+     * the merged text it goes up like any edit. Typing that overlaps the new
+     * version is left alone, and the conflict policy settles it after the save.
+     */
+    private async downloadIntoEditor(
+        path: string,
+        editor: OpenEditor,
+        nodeUid: string,
+        revisionUid: string,
+        remote: RemoteState | undefined,
+        local: LocalState | undefined,
+    ): Promise<void> {
+        const data = await this.drive!.downloadRevision(revisionUid, this.abortController?.signal);
+        if (await this.localMoved(path, local)) {
+            throw new LocalChangedError(path);
+        }
+        const remoteText = new TextDecoder().decode(data);
+        const diskText = local ? await this.vault.readText(path) : '';
+        const editorText = editor.text();
+
+        if (editorText === diskText) {
+            if (editorText !== remoteText) {
+                editor.replace(remoteText);
+            }
+            const written = await this.vault.writeBinary(path, data, remote?.mtime);
+            this.downloaded++;
+            this.state.setSynced(path, nodeUid, 'file', baseOf(written, revisionUid));
+            this.logger.debug(`Downloaded "${path}" into its open editor`);
+            return;
+        }
+
+        const merged = mergeThreeWay(diskText, editorText, remoteText);
+        if (!merged.merged) {
+            throw new EditorBusyError(path, false);
+        }
+        editor.replace(merged.text);
+        this.mergedIntoEditor.set(path, revisionUid);
+        throw new EditorBusyError(path, true);
+    }
+
+    /**
+     * Write one revision's content to a vault path.
+     *
+     * Large files, and files whose size Drive does not report, are streamed to
+     * disk where the platform allows it; the rest are small enough to buffer,
+     * which lets Obsidian's adapter do the write and keeps the file cache in
+     * step.
+     *
+     * `expected` is the local file the decision was made on, undefined for a
+     * path that must not exist yet. It is checked again after the bytes have
+     * arrived and right before they replace anything, because a download can
+     * take long enough for the user to save the same note in the meantime; that
+     * edit would otherwise be overwritten without trace. A mismatch abandons the
+     * write with a {@link LocalChangedError}, and the caller decides again.
+     */
     private async fetchInto(
         path: string,
-        what: { nodeUid: string } | { revisionUid: string },
+        revisionUid: string,
         size: number | undefined,
         mtime: number | undefined,
+        expected: LocalState | undefined,
     ): Promise<LocalState> {
         const drive = this.drive!;
         const signal = this.abortController?.signal;
@@ -996,9 +1469,10 @@ export class SyncEngine {
                 const file = await this.vault.openDownload(path);
                 if (file) {
                     try {
-                        await ('nodeUid' in what
-                            ? drive.downloadTo(what.nodeUid, file.sink, signal, onProgress)
-                            : drive.downloadRevisionTo(what.revisionUid, file.sink, signal, onProgress));
+                        await drive.downloadRevisionTo(revisionUid, file.sink, signal, onProgress);
+                        if (await this.localMoved(path, expected)) {
+                            throw new LocalChangedError(path);
+                        }
                         return await file.commit(mtime);
                     } catch (error) {
                         await file.abort();
@@ -1007,12 +1481,29 @@ export class SyncEngine {
                 }
             }
 
-            const data = await ('nodeUid' in what
-                ? drive.downloadFile(what.nodeUid, signal, onProgress)
-                : drive.downloadRevision(what.revisionUid, signal, onProgress));
+            const data = await drive.downloadRevision(revisionUid, signal, onProgress);
+            if (await this.localMoved(path, expected)) {
+                throw new LocalChangedError(path);
+            }
             return await this.vault.writeBinary(path, data, mtime);
         } finally {
             end();
+        }
+    }
+
+    /**
+     * Before trashing a node: is it still on the revision the decision saw?
+     * Another device may have uploaded an edit since, and trashing it then
+     * would send that edit to Drive's trash, and every device would delete it.
+     */
+    private async assertRemoteUnchanged(path: string, nodeUid: string): Promise<void> {
+        const expected = this.state.get(path)?.base?.remoteRevisionUid;
+        if (expected === undefined) {
+            return;
+        }
+        const node = await this.drive!.getNode(nodeUid);
+        if (node.activeRevision?.uid !== expected) {
+            throw new RemoteChangedError(path);
         }
     }
 
@@ -1023,6 +1514,15 @@ export class SyncEngine {
         remote: RemoteState | undefined,
     ): Promise<void> {
         const record = this.state.get(path);
+        if (reason === 'both-modified' && local && remote && this.mergedIntoEditor.get(path) === remote.revisionUid) {
+            // The local text is the editor's merge of this very revision, now
+            // saved: it holds both sides' changes, so it simply goes up.
+            this.mergedIntoEditor.delete(path);
+            this.logger.info(`Uploading "${path}", saved with the changes from Drive merged in`);
+            await this.upload(path, remote);
+            this.state.clearConflict(path);
+            return;
+        }
         this.logger.warn(`Conflict on "${path}" (${reason})`);
 
         const resolution = await this.resolverFor(path, reason).resolve({
@@ -1058,7 +1558,7 @@ export class SyncEngine {
 
             case 'take-remote':
                 if (remote) {
-                    await this.download(path, remote.nodeUid, remote.revisionUid, remote);
+                    await this.download(path, remote.nodeUid, remote.revisionUid, remote, local);
                     this.state.clearConflict(path);
                     this.reportConflict({ path, reason, outcome: 'kept-remote' });
                 }
@@ -1101,7 +1601,7 @@ export class SyncEngine {
             if (!remote) {
                 return false;
             }
-            await this.fetchInto(copyPath, { nodeUid: remote.nodeUid }, remote.size, remote.mtime);
+            await this.fetchInto(copyPath, remote.revisionUid, remote.size, remote.mtime, undefined);
             await this.uploadAsNewFile(copyPath);
             if (local) {
                 await this.upload(path, remote);
@@ -1113,7 +1613,7 @@ export class SyncEngine {
             await this.vault.copy(path, copyPath);
             await this.uploadAsNewFile(copyPath);
             if (remote) {
-                await this.download(path, remote.nodeUid, remote.revisionUid, remote);
+                await this.download(path, remote.nodeUid, remote.revisionUid, remote, local);
             }
         }
 
@@ -1235,6 +1735,94 @@ export class SyncEngine {
         const name = basename(toPath);
         if (drive.nameOf(node) !== name) {
             await drive.renameNode(nodeUid, name);
+        }
+    }
+
+    /**
+     * Find renames made in the vault that Drive has not seen, by content, and
+     * carry them over as renames.
+     *
+     * The rename event is the usual way a rename reaches Drive, but it is lost
+     * whenever the engine is not watching when it happens, when Obsidian
+     * closes before it is applied, or when the file is moved outside Obsidian,
+     * where there is no event at all. Left to the reconcile, such a rename
+     * reads as a deletion plus a new file: the Drive node is trashed with its
+     * revision history, the content is uploaded again, and every other device
+     * deletes and downloads instead of moving.
+     *
+     * A recorded file that is gone from the vault, and a file nobody has a
+     * record of with exactly the same content, are the same file. They are
+     * paired only when that is unambiguous: one of each for the content (two
+     * empty notes, or two copies of one template, could be either), and the
+     * Drive node still on the revision the last sync recorded, so that a
+     * rename never papers over an edit made on another device. Everything
+     * else is left to the reconcile, as before.
+     */
+    private async followLocalRenames(localFiles: string[], tree: RemoteTree): Promise<void> {
+        const present = new Set(localFiles);
+        const missing = this.state.entries().filter((record) => {
+            const remote = tree.files.get(record.path);
+            return (
+                record.type === 'file' &&
+                record.base !== undefined &&
+                !present.has(record.path) &&
+                !this.filter.isExcludedWithAncestors(record.path) &&
+                remote?.nodeUid === record.nodeUid &&
+                remote.revisionUid === record.base.remoteRevisionUid
+            );
+        });
+        if (missing.length === 0) {
+            return;
+        }
+
+        // Only files of a size some missing record had can match; only those are hashed.
+        const sizes = new Set(missing.map((record) => record.base!.size));
+        const candidates: { path: string; key: string }[] = [];
+        for (const path of localFiles) {
+            if (this.state.get(path) || tree.files.has(path) || this.filter.isExcludedWithAncestors(path)) {
+                continue;
+            }
+            const stat = await this.vault.stat(path);
+            if (!stat || !sizes.has(stat.size)) {
+                continue;
+            }
+            const state = await this.vault.getState(path);
+            if (state) {
+                // The reconcile would hash it anyway; keep the result for it.
+                this.plannedLocal.set(path, state);
+                candidates.push({ path, key: `${state.hash}:${state.size}` });
+            }
+        }
+
+        const byKey = new Map<string, { gone: typeof missing; found: string[] }>();
+        for (const record of missing) {
+            const key = `${record.base!.hash}:${record.base!.size}`;
+            const group = byKey.get(key) ?? { gone: [], found: [] };
+            group.gone.push(record);
+            byKey.set(key, group);
+        }
+        for (const candidate of candidates) {
+            byKey.get(candidate.key)?.found.push(candidate.path);
+        }
+
+        for (const { gone, found } of byKey.values()) {
+            if (gone.length !== 1 || found.length !== 1) {
+                continue;
+            }
+            const record = gone[0];
+            const to = found[0];
+            try {
+                await this.moveRemoteNode(record.nodeUid, to);
+            } catch (error) {
+                this.logger.warn(`Could not carry the rename of "${record.path}" to "${to}" over to Drive`, error);
+                continue;
+            }
+            const remote = tree.files.get(record.path)!;
+            tree.files.delete(record.path);
+            tree.files.set(to, remote);
+            tree.nodePaths.set(record.nodeUid, to);
+            this.state.rename(record.path, to);
+            this.logger.info(`Renamed "${record.path}" to "${to}" on Drive, as it was renamed here`);
         }
     }
 
@@ -1397,24 +1985,226 @@ export class SyncEngine {
      * told which.
      */
     private findCaseCollisions(paths: Set<string>): Set<string> {
-        const byFolded = new Map<string, string[]>();
+        // Folded per prefix, not only per path: `Notes/a.md` and `notes/b.md`
+        // differ as paths, but on this filesystem both folders are one.
+        const spellings = new Map<string, Set<string>>();
         for (const path of paths) {
-            const folded = path.toLowerCase();
-            byFolded.set(folded, [...(byFolded.get(folded) ?? []), path]);
-        }
-        const collisions = new Set<string>();
-        for (const group of byFolded.values()) {
-            if (group.length > 1) {
-                this.logger.warn(
-                    `Not syncing ${group.map((path) => `"${path}"`).join(' and ')}: their names differ only in ` +
-                        'letter case, which some devices cannot tell apart. Rename one of them.',
-                );
-                for (const path of group) {
-                    collisions.add(path);
-                }
+            for (const prefix of [...ancestorPaths(path), path]) {
+                const folded = prefix.toLowerCase();
+                spellings.set(folded, (spellings.get(folded) ?? new Set()).add(prefix));
             }
         }
+
+        const collisions = new Set<string>();
+        for (const path of paths) {
+            if ([...ancestorPaths(path), path].some((prefix) => spellings.get(prefix.toLowerCase())!.size > 1)) {
+                collisions.add(path);
+            }
+        }
+        for (const group of spellings.values()) {
+            if (group.size < 2) {
+                continue;
+            }
+            const names = [...group].sort();
+            const key = names.join('\n');
+            if (this.reportedCaseClashes.has(key)) {
+                continue;
+            }
+            this.reportedCaseClashes.add(key);
+            this.logger.warn(
+                `Not syncing ${names.map((name) => `"${name}"`).join(' and ')}: their names differ only in letter ` +
+                    'case, which this device cannot tell apart, and they could not be settled. Rename one of them.',
+            );
+            this.reportConflict({ path: names[0], reason: 'case-collision', outcome: 'not-synced' });
+        }
         return collisions;
+    }
+
+    /** Whether this vault's filesystem folds letter case; probed by asking for the config folder spelled the other way. */
+    private async isCaseInsensitive(): Promise<boolean> {
+        if (this.environment.caseInsensitive !== undefined) {
+            return this.environment.caseInsensitive;
+        }
+        if (this.caseInsensitive === null) {
+            const { configDir } = this.scope;
+            const swapped = [...configDir]
+                .map((char) => (char === char.toLowerCase() ? char.toUpperCase() : char.toLowerCase()))
+                .join('');
+            try {
+                this.caseInsensitive = swapped !== configDir && (await this.vault.exists(swapped));
+            } catch {
+                this.caseInsensitive = false;
+            }
+        }
+        return this.caseInsensitive;
+    }
+
+    /**
+     * Which spelling owns each name, folded to lower case: the one with a sync
+     * record first, then the one in the vault (`localPaths`). Covers every
+     * prefix, so folders are claimed along with the files in them.
+     */
+    private caseClaimants(localPaths: string[]): Map<string, string> {
+        const claimants = new Map<string, string>();
+        const claim = (path: string) => {
+            for (const prefix of [...ancestorPaths(path), path]) {
+                const folded = prefix.toLowerCase();
+                if (!claimants.has(folded)) {
+                    claimants.set(folded, prefix);
+                }
+            }
+        };
+        for (const record of this.state.entries()) {
+            claim(record.path);
+        }
+        for (const path of localPaths) {
+            claim(path);
+        }
+        return claimants;
+    }
+
+    /**
+     * Settle names on Drive that this device cannot keep apart, before the
+     * full sync compares anything.
+     *
+     * Drive tells `Note.md` from `note.md`; Windows, macOS, iOS and usually
+     * Android do not, and there both names reach the same file. Left alone, one
+     * would be downloaded over the other. So the spelling that already owns the
+     * name keeps it (the one with a sync record, else the one in the vault, else
+     * whichever comes first), and every other spelling is renamed on Drive,
+     * where that is always safe, to "note (case conflict).md". Both then sync
+     * normally on every device, and the user is told. Folders are settled first,
+     * so a folder renamed this way takes its files along.
+     */
+    private async settleTreeCaseClashes(tree: RemoteTree, local: { files: string[]; folders: string[] }): Promise<void> {
+        if (!(await this.isCaseInsensitive())) {
+            return;
+        }
+        const claimants = this.caseClaimants([...local.folders, ...local.files]);
+        const treePaths = [...tree.folders.keys(), ...tree.files.keys()].sort(byDepth);
+        for (const path of treePaths) {
+            const folderUid = tree.folders.get(path);
+            const uid = folderUid ?? tree.files.get(path)?.nodeUid;
+            if (uid === undefined || this.filter.isExcludedWithAncestors(path)) {
+                // Re-keyed under a folder renamed earlier in this loop, or not synced.
+                continue;
+            }
+            const folded = path.toLowerCase();
+            const owner = claimants.get(folded);
+            if (owner === undefined) {
+                claimants.set(folded, path);
+                continue;
+            }
+            if (owner === path) {
+                continue;
+            }
+            const renamed = await this.renameForCase(uid, path, owner, folderUid !== undefined, claimants);
+            if (renamed !== null) {
+                renameInTree(tree, path, renamed);
+            }
+        }
+    }
+
+    /**
+     * The same, for paths arriving one at a time from Drive's events: a path
+     * with no record whose name, or any folder above it, clashes with a
+     * recorded one is renamed on Drive first, and the pass goes on with its new
+     * name.
+     */
+    private async settleCaseClashesIn(paths: Set<string>): Promise<Set<string>> {
+        const claimants = this.caseClaimants([]);
+        const settled = new Set<string>();
+        for (const path of paths) {
+            if (this.state.get(path)) {
+                settled.add(path);
+                continue;
+            }
+            const resolved = await this.resolveCaseClash(path, claimants);
+            const clash = [...ancestorPaths(resolved), resolved].find((prefix) => {
+                const owner = claimants.get(prefix.toLowerCase());
+                return owner !== undefined && owner !== prefix;
+            });
+            if (clash === undefined) {
+                settled.add(resolved);
+                continue;
+            }
+            // Could not be settled. Looking it up here would find the other
+            // spelling's file, so it is left out rather than compared wrongly.
+            const owner = claimants.get(clash.toLowerCase())!;
+            const key = [clash, owner].sort().join('\n');
+            if (!this.reportedCaseClashes.has(key)) {
+                this.reportedCaseClashes.add(key);
+                this.logger.warn(`Not syncing "${path}": it clashes with "${owner}" apart from letter case`);
+                this.reportConflict({ path: owner, reason: 'case-collision', outcome: 'not-synced' });
+            }
+        }
+        return settled;
+    }
+
+    /** `path`, or where it lives after the part of it that clashes was renamed on Drive. */
+    private async resolveCaseClash(path: string, claimants: Map<string, string>): Promise<string> {
+        const prefixes = [...ancestorPaths(path), path];
+        for (const [index, prefix] of prefixes.entries()) {
+            const owner = claimants.get(prefix.toLowerCase());
+            if (owner === undefined || owner === prefix) {
+                continue;
+            }
+            const isFolder = index < prefixes.length - 1;
+            let uid: string | undefined;
+            try {
+                uid = isFolder
+                    ? await this.findRemoteFolder(prefix)
+                    : (await this.findByName(prefix, new Map()))?.nodeUid;
+            } catch (error) {
+                this.logger.debug(`Could not look up "${prefix}" to settle a case clash`, error);
+            }
+            if (uid === undefined) {
+                // Not on Drive, so not this device's to rename.
+                return path;
+            }
+            const renamed = await this.renameForCase(uid, prefix, owner, isFolder, claimants);
+            return renamed === null ? path : replacePrefix(path, prefix, renamed);
+        }
+        return path;
+    }
+
+    /**
+     * Rename a node on Drive to "<name> (case conflict)", numbered if that is
+     * taken. Returns the new path, or null if it could not be renamed.
+     */
+    private async renameForCase(
+        nodeUid: string,
+        path: string,
+        owner: string,
+        isFolder: boolean,
+        claimants: Map<string, string>,
+    ): Promise<string | null> {
+        const name = basename(path);
+        const { stem, extension } = isFolder ? { stem: name, extension: '' } : splitExtension(name);
+        for (let n = 1; n <= 20; n++) {
+            const candidate = `${stem} (case conflict${n === 1 ? '' : ` ${n}`})${extension}`;
+            const target = joinPath(parentPath(path), candidate);
+            if (claimants.has(target.toLowerCase())) {
+                continue;
+            }
+            try {
+                await this.drive!.renameNode(nodeUid, candidate);
+            } catch (error) {
+                if (error instanceof NodeWithSameNameExistsValidationError) {
+                    continue;
+                }
+                this.logger.warn(`Could not rename "${path}" on Drive to settle a case clash with "${owner}"`, error);
+                return null;
+            }
+            claimants.set(target.toLowerCase(), target);
+            this.logger.warn(
+                `"${path}" and "${owner}" differ only in letter case, which this device cannot tell apart; ` +
+                    `renamed "${path}" to "${target}" on Drive`,
+            );
+            this.reportConflict({ path: owner, reason: 'case-collision', outcome: 'renamed', copyPath: target });
+            return target;
+        }
+        return null;
     }
 
     /** A node's location, or null when Drive could not be asked. */
@@ -1820,11 +2610,38 @@ export class SyncEngine {
         if (this.pollTimer !== null) {
             window.clearTimeout(this.pollTimer);
         }
-        const seconds = Math.max(MIN_POLL_SECONDS, this.settings.remotePollSeconds);
+        const seconds = this.pollIntervalSeconds();
+        this.pollDueAt = Date.now() + seconds * 1000;
         this.pollTimer = window.setTimeout(() => {
             this.pollTimer = null;
             this.runPoll();
         }, seconds * 1000);
+    }
+
+    /** Seconds until the next check of Drive, from the base interval and how active things are; see {@link ACTIVE_WINDOW_MS}. */
+    pollIntervalSeconds(now = Date.now()): number {
+        const base = Math.max(MIN_POLL_SECONDS, this.settings.remotePollSeconds);
+        const idle = Math.max(base, Math.min(MAX_IDLE_POLL_SECONDS, base * IDLE_POLL_FACTOR));
+        if (this.environment.isHidden?.()) {
+            return idle;
+        }
+        const quietFor = now - this.lastActivityAt;
+        if (quietFor < ACTIVE_WINDOW_MS) {
+            return Math.max(MIN_POLL_SECONDS, Math.round(base / 2));
+        }
+        return quietFor > IDLE_AFTER_MS ? idle : base;
+    }
+
+    /**
+     * Something changed. If the next check was scheduled for a quiet spell,
+     * bring it forward to the active pace, since another device may well be
+     * answering.
+     */
+    private noteActivity(): void {
+        this.lastActivityAt = Date.now();
+        if (this.pollTimer !== null && this.pollDueAt - Date.now() > this.pollIntervalSeconds() * 1000) {
+            this.scheduleRemotePoll();
+        }
     }
 
     private runPoll(): void {
@@ -1914,8 +2731,7 @@ export class SyncEngine {
     }
 
     private async applyRemoteEvents(events: NodeChange[]): Promise<void> {
-        const paths = new Set(this.retryPaths);
-        this.retryPaths.clear();
+        const paths = new Set(this.state.dueRetries());
         const confirmedAbsent = new Set<string>();
         const goneFolders: string[] = [];
 
@@ -1943,6 +2759,7 @@ export class SyncEngine {
 
         if (paths.size > 0) {
             this.logger.debug(`${paths.size} path(s) changed on Drive`);
+            this.noteActivity();
             await this.processPaths(paths, confirmedAbsent);
         }
         for (const path of goneFolders.sort((a, b) => byDepth(b, a))) {
@@ -1996,7 +2813,7 @@ export class SyncEngine {
             default:
                 // Could not be located this time; try again on the next poll.
                 for (const file of filesWithin(record.path)) {
-                    this.retryPaths.add(file.path);
+                    this.state.retry(file.path);
                 }
         }
     }
@@ -2026,10 +2843,15 @@ export class SyncEngine {
             return null;
         }
         if (location.node.type === NodeType.Folder) {
-            if (!this.filter.isExcludedWithAncestors(location.path)) {
-                await this.vault.ensureFolder(location.path);
-                this.folderUids.set(location.path, location.node.uid);
-                this.state.setSynced(location.path, location.node.uid, 'folder');
+            // A new folder spelled like an existing one but for letter case
+            // would land inside it here; give it a name of its own first.
+            const path = (await this.isCaseInsensitive())
+                ? await this.resolveCaseClash(location.path, this.caseClaimants([]))
+                : location.path;
+            if (!this.filter.isExcludedWithAncestors(path)) {
+                await this.vault.ensureFolder(path);
+                this.folderUids.set(path, location.node.uid);
+                this.state.setSynced(path, location.node.uid, 'folder');
             }
             return null;
         }
@@ -2247,6 +3069,36 @@ export class SyncEngine {
         this.hooks.onConflict(event);
     }
 
+    /** Transfers allowed at once right now. */
+    currentTransferLimit(): number {
+        return this.transferLimit;
+    }
+
+    /**
+     * After each transfer: halve the pace if Proton has answered "too many
+     * requests" since the last adjustment, otherwise add one every few
+     * transfers, up to the user's setting and never during the cool-down.
+     */
+    private adjustTransferLimit(): void {
+        const max = Math.max(1, this.settings.transferConcurrency);
+        const limited = requestStats.lastRateLimited();
+        if (limited !== null && limited !== this.rateLimitSeen) {
+            this.rateLimitSeen = limited;
+            this.transferLimit = Math.max(1, Math.floor(this.transferLimit / 2));
+            this.transfersSinceRamp = 0;
+            this.logger.info(`Proton asked to slow down; ${this.transferLimit} transfer(s) at a time for now`);
+            return;
+        }
+        this.transferLimit = Math.min(this.transferLimit, max);
+        this.transfersSinceRamp++;
+        const coolingDown = limited !== null && Date.now() - limited < RATE_LIMIT_COOLDOWN_MS;
+        if (!coolingDown && this.transfersSinceRamp >= RAMP_EVERY && this.transferLimit < max) {
+            this.transferLimit++;
+            this.transfersSinceRamp = 0;
+            this.logger.debug(`${this.transferLimit} transfer(s) at a time`);
+        }
+    }
+
     /** Tell the UI about progress, at most once per {@link CHANGE_THROTTLE_MS}. */
     private emitChange(): void {
         if (this.changeTimer !== null) {
@@ -2396,12 +3248,39 @@ function needsTransfer(action: SyncAction): boolean {
     return action.type !== 'noop' && action.type !== 'forget' && action.type !== 'adopt';
 }
 
+/** "45 s", "3 min", "1 h": how long until a retry. */
+function formatWait(ms: number): string {
+    const seconds = Math.ceil(ms / 1000);
+    if (seconds < 60) {
+        return `${seconds} s`;
+    }
+    const minutes = Math.round(seconds / 60);
+    return minutes < 60 ? `${minutes} min` : `${Math.round(minutes / 60)} h`;
+}
+
 function megabytes(bytes: number): number {
     return Math.round(bytes / 1024 / 1024);
 }
 
 function baseOf(local: LocalState, remoteRevisionUid: string): SyncBase {
     return { hash: local.hash, size: local.size, localMtime: local.mtime, remoteRevisionUid };
+}
+
+/** Re-key everything at or below `from` in a listed tree to `to`, after renaming it on Drive. */
+function renameInTree(tree: RemoteTree, from: string, to: string): void {
+    for (const map of [tree.files, tree.folders] as Map<string, unknown>[]) {
+        for (const [path, value] of [...map]) {
+            if (isWithin(path, from)) {
+                map.delete(path);
+                map.set(replacePrefix(path, from, to), value);
+            }
+        }
+    }
+    for (const [uid, path] of tree.nodePaths) {
+        if (isWithin(path, from)) {
+            tree.nodePaths.set(uid, replacePrefix(path, from, to));
+        }
+    }
 }
 
 function byDepth(a: string, b: string): number {

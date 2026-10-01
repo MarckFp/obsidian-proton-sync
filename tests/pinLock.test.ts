@@ -106,7 +106,8 @@ describe('PinProtectedSlot', () => {
         const inner = memory(SESSION);
         await protect(inner).setPin('482915');
         const envelope = JSON.parse(inner.value!) as { data: string };
-        envelope.data = `A${envelope.data.slice(1)}`;
+        // Always a different character, so the data really changes.
+        envelope.data = `${envelope.data.startsWith('A') ? 'B' : 'A'}${envelope.data.slice(1)}`;
         inner.value = JSON.stringify(envelope);
         assert.equal(await protect(inner).unlock('482915'), false);
     });

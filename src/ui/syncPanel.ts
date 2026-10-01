@@ -1,18 +1,32 @@
 import { ButtonComponent, ItemView, setIcon, type WorkspaceLeaf } from 'obsidian';
 
-import type { SyncSummary } from '../sync/engine';
+import type { PendingChange, SyncSummary } from '../sync/engine';
 import type { LogEntry } from '../util/logger';
-import { statusDescription, statusDetails, statusIcon, statusLabel, transferPercent } from './syncStatus';
+import {
+    PENDING_TEXT,
+    statusDescription,
+    statusDetails,
+    statusIcon,
+    statusLabel,
+    transferPercent,
+} from './syncStatus';
 
 export const SYNC_PANEL_VIEW = 'proton-drive-sync-panel';
 
 /** Log entries shown in the panel, newest first. */
 const RECENT_ENTRIES = 20;
 
+/** Entries of the "Not synced yet" list shown before the rest are counted. */
+const MAX_PENDING_SHOWN = 30;
+
+
 /** What the panel needs from the plugin; kept narrow so the view holds no plugin internals. */
 export type SyncPanelHost = {
     summary(): SyncSummary;
     logEntries(): readonly LogEntry[];
+    pendingChanges(): PendingChange[];
+    /** Open a note, from the "Not synced yet" list. */
+    openFile(path: string): void;
     syncNow(): void;
     togglePause(): void;
     showConflicts(): void;
@@ -41,6 +55,8 @@ export class SyncPanelView extends ItemView {
     private pauseButton!: ButtonComponent;
     private conflictsButton!: ButtonComponent;
     private logEl!: HTMLElement;
+    private pendingHeadingEl!: HTMLElement;
+    private pendingEl!: HTMLElement;
 
     constructor(
         leaf: WorkspaceLeaf,
@@ -85,6 +101,9 @@ export class SyncPanelView extends ItemView {
             .setTooltip('Settings')
             .onClick(() => this.host.openSettings());
 
+        this.pendingHeadingEl = root.createEl('h6', { cls: 'proton-drive-sync-panel-heading' });
+        this.pendingEl = root.createDiv({ cls: 'proton-drive-sync-panel-pending' });
+
         root.createEl('h6', { text: 'Recent activity', cls: 'proton-drive-sync-panel-heading' });
         this.logEl = root.createEl('pre', { cls: 'proton-drive-sync-log' });
 
@@ -127,6 +146,8 @@ export class SyncPanelView extends ItemView {
         this.conflictsButton.setButtonText(summary.conflicts > 0 ? `Review ${summary.conflicts}` : 'Conflicts');
         this.conflictsButton.buttonEl.toggleClass('mod-warning', summary.conflicts > 0);
 
+        this.renderPending(this.host.pendingChanges(), summary);
+
         const entries = this.host.logEntries().slice(-RECENT_ENTRIES).reverse();
         this.logEl.setText(
             entries.length === 0
@@ -135,5 +156,40 @@ export class SyncPanelView extends ItemView {
                       .map((entry) => `${new Date(entry.time).toLocaleTimeString()} ${entry.message}`)
                       .join('\n'),
         );
+    }
+
+    /**
+     * Everything not in sync, and why, so a note that is not reaching the other
+     * devices is visible here instead of being found missing there.
+     */
+    private renderPending(changes: PendingChange[], summary: SyncSummary): void {
+        this.pendingHeadingEl.setText(changes.length === 0 ? 'Not synced yet' : `Not synced yet (${changes.length})`);
+        this.pendingEl.empty();
+        if (changes.length === 0) {
+            this.pendingEl.createDiv({
+                cls: 'proton-drive-sync-muted',
+                text:
+                    summary.status === 'paused'
+                        ? 'Syncing is paused. Changes made meanwhile are found and synced when you resume.'
+                        : 'Everything is synced.',
+            });
+            return;
+        }
+        const list = this.pendingEl.createEl('ul', { cls: 'proton-drive-sync-panel-details' });
+        for (const change of changes.slice(0, MAX_PENDING_SHOWN)) {
+            const item = list.createEl('li');
+            const link = item.createEl('a', { text: change.path, href: '#' });
+            link.addEventListener('click', (event) => {
+                event.preventDefault();
+                this.host.openFile(change.path);
+            });
+            item.createDiv({
+                cls: 'proton-drive-sync-muted',
+                text: change.detail ? `${PENDING_TEXT[change.reason]} (${change.detail})` : PENDING_TEXT[change.reason],
+            });
+        }
+        if (changes.length > MAX_PENDING_SHOWN) {
+            list.createEl('li', { text: `…and ${changes.length - MAX_PENDING_SHOWN} more.` });
+        }
     }
 }

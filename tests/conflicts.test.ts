@@ -181,8 +181,7 @@ describe('ConflictResolver — merge', () => {
 
     it('combines edits made to different parts of the note', async () => {
         const { drive } = stubDrive({
-            revisions: { 'rev-1': ancestor },
-            files: { 'node-1': 'line one\nline two\nLINE THREE' },
+            revisions: { 'rev-1': ancestor, 'rev-2': 'line one\nline two\nLINE THREE' },
         });
 
         const result = await resolver('merge', drive).resolve(
@@ -198,17 +197,25 @@ describe('ConflictResolver — merge', () => {
 
     it('fetches the ancestor by the revision uid the last sync recorded', async () => {
         const { drive, calls } = stubDrive({
-            revisions: { 'rev-1': ancestor },
-            files: { 'node-1': ancestor },
+            revisions: { 'rev-1': ancestor, 'rev-2': ancestor },
         });
         await resolver('merge', drive).resolve(context({ readLocalText: async () => ancestor }));
         assert.ok(calls.includes('revision:rev-1'), `expected the base revision to be fetched, got ${calls}`);
     });
 
+    it('fetches the Drive side by the revision the conflict was found on, not the active one', async () => {
+        const { drive, calls } = stubDrive({
+            revisions: { 'rev-1': ancestor, 'rev-2': ancestor },
+            files: { 'node-1': 'a newer revision uploaded since' },
+        });
+        await resolver('merge', drive).resolve(context({ readLocalText: async () => ancestor }));
+        assert.ok(calls.includes('revision:rev-2'), `expected the decided revision to be fetched, got ${calls}`);
+        assert.ok(!calls.includes('file:node-1'), `expected no download of the active revision, got ${calls}`);
+    });
+
     it('keeps both when the edits overlap', async () => {
         const { drive } = stubDrive({
-            revisions: { 'rev-1': ancestor },
-            files: { 'node-1': 'line one\nREMOTE\nline three' },
+            revisions: { 'rev-1': ancestor, 'rev-2': 'line one\nREMOTE\nline three' },
         });
 
         const result = await resolver('merge', drive).resolve(
@@ -220,7 +227,7 @@ describe('ConflictResolver — merge', () => {
     it('keeps both when the ancestor revision is no longer on Drive', async () => {
         // Drive prunes revision history depending on the plan, so the merge has
         // to degrade rather than fail.
-        const { drive } = stubDrive({ files: { 'node-1': 'remote text' } });
+        const { drive } = stubDrive({ revisions: { 'rev-2': 'remote text' } });
 
         const result = await resolver('merge', drive).resolve(context());
         assert.equal(result.action, 'keep-both');

@@ -12,6 +12,7 @@ const PENDING_REASON_TEXT: Record<ConflictReason, string> = {
     'both-created': 'Created independently here and on another device.',
     'deleted-remotely-modified-locally': 'Deleted on another device, but edited here.',
     'deleted-locally-modified-remotely': 'Deleted here, but edited on another device.',
+    'case-collision': 'Has the same name as another file apart from letter case.',
 };
 
 /**
@@ -158,7 +159,9 @@ export class ConflictsModal extends Modal {
                 }),
             );
         }
-        if (copyExists && isTextPath(record.path) && record.copyPath !== undefined) {
+        // Only a conflict copy is another version of the note; a file renamed
+        // for a case clash is a different note altogether.
+        if (record.outcome === 'kept-both' && copyExists && isTextPath(record.path) && record.copyPath !== undefined) {
             const copyPath = record.copyPath;
             setting.addButton((button) =>
                 button

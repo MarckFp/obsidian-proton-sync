@@ -51,7 +51,13 @@ export type ConflictReason =
     | 'both-created'
     /** One side deleted the file while the other edited it. */
     | 'deleted-remotely-modified-locally'
-    | 'deleted-locally-modified-remotely';
+    | 'deleted-locally-modified-remotely'
+    /**
+     * Two names differ only in letter case, which this device's filesystem
+     * cannot keep apart. Not produced by `reconcile`; reported by the engine
+     * when it settles or finds such a pair.
+     */
+    | 'case-collision';
 
 /** Local view of a path at reconcile time; `undefined` means it does not exist. */
 export type LocalState = ContentStamp;

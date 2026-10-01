@@ -35,6 +35,9 @@ export function diskVault() {
         async mkdir(vaultPath: string) {
             mkdirSync(full(vaultPath), { recursive: true });
         },
+        async remove(vaultPath: string) {
+            await fs.unlink(full(vaultPath));
+        },
         async list(vaultPath: string) {
             const entries = await fs.readdir(full(vaultPath), { withFileTypes: true });
             const prefix = vaultPath === '' ? '' : `${vaultPath}/`;

@@ -23,7 +23,17 @@ type StateFile = {
     conflicts: Record<string, ConflictInfo>;
     /** Last processed Drive event id, per tree event scope. */
     eventCursors: Record<string, string>;
+    /** Paths a pass could not settle, to try again; see {@link SyncState.retry}. Absent in files from older versions. */
+    retries?: Record<string, RetryInfo>;
+    /** When the last full sync finished, in epoch ms. */
+    lastFullSyncAt?: number | null;
 };
+
+type RetryInfo = { attempts: number; after: number };
+
+/** Waits between retries of one path after the first: 30 s, doubling, at most an hour. */
+const RETRY_BASE_MS = 30_000;
+const RETRY_MAX_MS = 60 * 60_000;
 
 /**
  * The sync's memory between sessions: for every path, what local and remote
@@ -32,9 +42,17 @@ type StateFile = {
  * This is the merge base from `reconcile`, so losing it is not fatal but is
  * expensive — without it every path falls back to the "no common ancestor"
  * rules, where anything that differs becomes a conflict instead of a one-sided
- * change. It is therefore written whole, atomically, and tied to the account
- * and folder it describes so that pointing the plugin somewhere new starts
- * clean rather than reconciling against a stranger's tree.
+ * change, and deletions made since the last sync come back. It is tied to the
+ * account and folder it describes, so that pointing the plugin somewhere new
+ * starts clean rather than reconciling against a stranger's tree.
+ *
+ * It is written so that a crash, a killed mobile app or a full disk can never
+ * leave only a torn copy: the new state goes to `<file>.tmp`, the current file
+ * becomes `<file>.bak`, and only then does the new one take its name. Loading
+ * tries the file, then the temporary file (a write that finished but was not
+ * yet moved into place), then the backup. Only when copies exist and none can
+ * be read is the state reported lost, see {@link SyncState.wasLost}, rather
+ * than quietly started afresh.
  *
  * Writes are coalesced: a full sync touches thousands of records and each one
  * would otherwise rewrite the file.
@@ -44,9 +62,12 @@ export class SyncState {
     private nodeUidToPath = new Map<string, string>();
     private unresolvedConflicts = new Map<string, ConflictInfo>();
     private eventCursors = new Map<string, string>();
+    private retries = new Map<string, RetryInfo>();
+    private lastFullSyncAt: number | null = null;
     private accountEmail: string | null = null;
     private remoteFolderUid: string | null = null;
 
+    private lost = false;
     private dirty = false;
     private flushTimer: number | null = null;
     private writing: Promise<void> = Promise.resolve();
@@ -57,48 +78,97 @@ export class SyncState {
         private readonly logger: Logger,
     ) {}
 
+    private get tempPath(): string {
+        return `${this.filePath}.tmp`;
+    }
+
+    private get backupPath(): string {
+        return `${this.filePath}.bak`;
+    }
+
+    /**
+     * Whether the last `load` found a saved state but could read none of its
+     * copies. The state is empty then, as for a first sync, but the user had
+     * one, and should hear about it before a sync runs on the assumption that
+     * nothing was ever synced.
+     */
+    wasLost(): boolean {
+        return this.lost;
+    }
+
     async load(accountEmail: string | null, remoteFolderUid: string | null): Promise<void> {
         this.records.clear();
         this.nodeUidToPath.clear();
         this.unresolvedConflicts.clear();
         this.eventCursors.clear();
+        this.retries.clear();
+        this.lastFullSyncAt = null;
         this.accountEmail = accountEmail;
         this.remoteFolderUid = remoteFolderUid;
 
-        if (!(await this.adapter.exists(this.filePath))) {
+        this.lost = false;
+
+        let file: StateFile | null = null;
+        let found = false;
+        for (const candidate of [this.filePath, this.tempPath, this.backupPath]) {
+            if (!(await this.adapter.exists(candidate))) {
+                continue;
+            }
+            found = true;
+            file = await this.readCandidate(candidate);
+            if (file) {
+                if (candidate !== this.filePath) {
+                    this.logger.warn(`The sync state file was unreadable; recovered it from "${candidate}"`);
+                }
+                break;
+            }
+        }
+        if (!file) {
+            if (found) {
+                this.lost = true;
+                this.logger.error('Could not read any copy of the sync state; this device has to compare everything afresh');
+            }
             return;
         }
 
-        try {
-            const file = JSON.parse(await this.adapter.read(this.filePath)) as StateFile;
-
-            if (file.version !== STATE_VERSION) {
-                this.logger.info(`Discarding sync state written by another version (${file.version})`);
-                return;
-            }
-            if (file.accountEmail !== accountEmail || file.remoteFolderUid !== remoteFolderUid) {
-                this.logger.info('Sync state belongs to a different account or folder; starting fresh');
-                return;
-            }
-
-            for (const [path, record] of Object.entries(file.records ?? {})) {
-                this.records.set(path, record);
-                this.nodeUidToPath.set(record.nodeUid, path);
-            }
-            for (const [path, conflict] of Object.entries(file.conflicts ?? {})) {
-                this.unresolvedConflicts.set(path, conflict);
-            }
-            for (const [scope, eventId] of Object.entries(file.eventCursors ?? {})) {
-                this.eventCursors.set(scope, eventId);
-            }
-            this.logger.debug(`Loaded sync state for ${this.records.size} paths`);
-        } catch (error) {
-            this.logger.error('Failed to read sync state; starting fresh', error);
-            this.records.clear();
-            this.nodeUidToPath.clear();
-            this.unresolvedConflicts.clear();
-            this.eventCursors.clear();
+        if (file.version !== STATE_VERSION) {
+            this.logger.info(`Discarding sync state written by another version (${file.version})`);
+            return;
         }
+        if (file.accountEmail !== accountEmail || file.remoteFolderUid !== remoteFolderUid) {
+            this.logger.info('Sync state belongs to a different account or folder; starting fresh');
+            return;
+        }
+
+        for (const [path, record] of Object.entries(file.records ?? {})) {
+            this.records.set(path, record);
+            this.nodeUidToPath.set(record.nodeUid, path);
+        }
+        for (const [path, conflict] of Object.entries(file.conflicts ?? {})) {
+            this.unresolvedConflicts.set(path, conflict);
+        }
+        for (const [scope, eventId] of Object.entries(file.eventCursors ?? {})) {
+            this.eventCursors.set(scope, eventId);
+        }
+        for (const [path, retry] of Object.entries(file.retries ?? {})) {
+            this.retries.set(path, retry);
+        }
+        this.lastFullSyncAt = typeof file.lastFullSyncAt === 'number' ? file.lastFullSyncAt : null;
+        this.logger.debug(`Loaded sync state for ${this.records.size} paths`);
+    }
+
+    /** A copy of the state file, or null if it is torn, empty or not what this class writes. */
+    private async readCandidate(path: string): Promise<StateFile | null> {
+        try {
+            const file = JSON.parse(await this.adapter.read(path)) as Partial<StateFile> | null;
+            if (file && typeof file.version === 'number' && typeof file.records === 'object' && file.records !== null) {
+                return file as StateFile;
+            }
+            this.logger.warn(`"${path}" is not a sync state file`);
+        } catch (error) {
+            this.logger.warn(`Could not read "${path}"`, error);
+        }
+        return null;
     }
 
     get(path: string): SyncRecord | undefined {
@@ -184,6 +254,11 @@ export class SyncState {
             this.unresolvedConflicts.delete(fromPath);
             this.unresolvedConflicts.set(toPath, conflict);
         }
+        const retry = this.retries.get(fromPath);
+        if (retry) {
+            this.retries.delete(fromPath);
+            this.retries.set(toPath, retry);
+        }
         this.markDirty();
     }
 
@@ -207,6 +282,74 @@ export class SyncState {
                 this.markDirty();
             }
         }
+        for (const path of [...this.retries.keys()]) {
+            if (isWithin(path, fromPath)) {
+                const retry = this.retries.get(path)!;
+                this.retries.delete(path);
+                this.retries.set(replacePrefix(path, fromPath, toPath), retry);
+                this.markDirty();
+            }
+        }
+    }
+
+    /**
+     * Note a path to try again, saved with the rest of the state.
+     *
+     * Kept here rather than in memory because the event that named the path
+     * is behind the saved event cursor once the poll that failed has finished:
+     * a retry list lost to a restart, which on mobile is often, would leave the
+     * change unapplied until the next full sync. The first retry is immediate;
+     * after that each failure doubles the wait, so a path that cannot be settled (a name this filesystem refuses, a file
+     * locked for days) is retried rarely instead of on every poll. `backoff:
+     * false` queues it for the next pass without counting a failure, for a
+     * path that was merely held back, by the Wi-Fi setting, say.
+     */
+    retry(path: string, { backoff = true }: { backoff?: boolean } = {}, now = Date.now()): void {
+        const previous = this.retries.get(path);
+        const attempts = (previous?.attempts ?? 0) + (backoff ? 1 : 0);
+        // The first retry goes with the next poll, as a one-off glitch
+        // deserves; only a path that keeps failing starts to wait.
+        const wait = backoff && attempts > 1 ? Math.min(RETRY_BASE_MS * 2 ** (attempts - 2), RETRY_MAX_MS) : 0;
+        this.retries.set(path, { attempts, after: now + wait });
+        this.markDirty();
+    }
+
+    /** Paths whose wait has passed. */
+    dueRetries(now = Date.now()): string[] {
+        return [...this.retries].filter(([, retry]) => retry.after <= now).map(([path]) => path);
+    }
+
+    /** All queued retries, due or not. */
+    pendingRetries(): string[] {
+        return [...this.retries.keys()];
+    }
+
+    /** Queued retries with how often each has failed, and when it is next due. */
+    retryEntries(): { path: string; attempts: number; after: number }[] {
+        return [...this.retries].map(([path, retry]) => ({ path, ...retry }));
+    }
+
+    clearRetry(path: string): void {
+        if (this.retries.delete(path)) {
+            this.markDirty();
+        }
+    }
+
+    /** After a full sync, which settles everything it could. */
+    clearRetries(): void {
+        if (this.retries.size > 0) {
+            this.retries.clear();
+            this.markDirty();
+        }
+    }
+
+    getLastFullSync(): number | null {
+        return this.lastFullSyncAt;
+    }
+
+    setLastFullSync(time: number): void {
+        this.lastFullSyncAt = time;
+        this.markDirty();
     }
 
     getEventCursor(treeEventScopeId: string): string | null {
@@ -227,8 +370,20 @@ export class SyncState {
         this.nodeUidToPath.clear();
         this.unresolvedConflicts.clear();
         this.eventCursors.clear();
+        this.retries.clear();
+        this.lastFullSyncAt = null;
+        this.lost = false;
         this.markDirty();
         await this.flush();
+        // A deliberate reset must not come back from the backup if the new
+        // file were ever unreadable.
+        try {
+            if (await this.adapter.exists(this.backupPath)) {
+                await this.adapter.remove(this.backupPath);
+            }
+        } catch (error) {
+            this.logger.warn('Could not remove the previous sync state backup', error);
+        }
     }
 
     async flush(): Promise<void> {
@@ -248,13 +403,15 @@ export class SyncState {
             records: Object.fromEntries(this.records),
             conflicts: Object.fromEntries(this.unresolvedConflicts),
             eventCursors: Object.fromEntries(this.eventCursors),
+            retries: Object.fromEntries(this.retries),
+            lastFullSyncAt: this.lastFullSyncAt,
         };
 
         // Serialise writes so a slow flush cannot be overtaken by a later one
         // and leave the older state on disk.
         this.writing = this.writing
             .catch(() => undefined)
-            .then(() => this.adapter.write(this.filePath, JSON.stringify(file)))
+            .then(() => this.writeAtomically(JSON.stringify(file)))
             .catch((error: unknown) => {
                 this.logger.error('Failed to write sync state', error);
                 // Put the change back so the next flush retries it.
@@ -262,6 +419,23 @@ export class SyncState {
             });
 
         return this.writing;
+    }
+
+    /**
+     * Replace the state file without ever leaving only a partial one: write
+     * the new copy beside it, keep the current one as the backup, then move
+     * the new one into place. Renames never land on an existing file, which
+     * not every platform's adapter allows.
+     */
+    private async writeAtomically(text: string): Promise<void> {
+        await this.adapter.write(this.tempPath, text);
+        if (await this.adapter.exists(this.backupPath)) {
+            await this.adapter.remove(this.backupPath);
+        }
+        if (await this.adapter.exists(this.filePath)) {
+            await this.adapter.rename(this.filePath, this.backupPath);
+        }
+        await this.adapter.rename(this.tempPath, this.filePath);
     }
 
     private markDirty(): void {

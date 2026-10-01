@@ -21,7 +21,10 @@ same implementation Proton's own clients use.
   audio, PDFs), folders, and your `.obsidian` settings.
 - **Renames stay renames.** Renaming or moving a note or folder, here or on
   another device, renames the same file on the other side, keeping its Drive
-  revision history.
+  revision history. That holds even for renames made while syncing was paused,
+  locked or on mobile data, or outside Obsidian (in a file manager, with `git
+  mv`): the next full sync recognises the file by its content and moves it on
+  Drive instead of deleting and uploading it again.
 - **Three-way conflict detection.** Every synced file records the version both
   sides last agreed on, so a device that has been offline for a week can tell an
   edit it missed from an edit it made. Only a genuine double-edit is reported as
@@ -43,11 +46,25 @@ same implementation Proton's own clients use.
 - **Pause and resume**, from the status bar, the command palette or settings.
 - **A status bar that says what is happening**: files checked in the current
   pass, the progress of a large upload or download, and how long ago the last
-  sync finished.
+  sync finished. A dot beside the icon shows whether the note you are looking
+  at is in sync: pulsing green when it is, red when it has changes not synced
+  yet. On mobile the same dot sits in each note's header.
+- **Nothing fails to sync unseen.** The sync panel lists every change not
+  synced yet, and why: waiting for Wi-Fi, retrying after a failure, too large
+  for this device, waiting on a conflict decision.
+- **Edits arriving while you type are merged in.** A new version of a note you
+  have open is brought into the editor without moving the cursor, and if you
+  have unsaved typing, merged with it rather than written underneath it.
 - **Mobile-friendly options**: sync on Wi-Fi only (Android), and leave large
   files for a computer to sync.
 - **Event-based updates.** Changes from other devices arrive through Drive's
-  event feed rather than by re-walking the tree.
+  event feed rather than by re-walking the tree, and so does the catch-up when
+  Obsidian opens: a scan of the vault finds what changed here while it was
+  closed, and the event feed what changed on Drive. The whole Drive folder is
+  only walked when that cannot tell the whole story (a first sync, a file
+  renamed or deleted while Obsidian was closed, Drive asking for it) and at
+  least once a day. Changes that fail to apply are retried, also after a
+  restart, waiting longer each time they fail again.
 
 ## Before you rely on this
 
@@ -55,7 +72,9 @@ A few things are worth knowing before you point this at a vault you care about.
 
 **"Almost instant" is one-way.** Local edits upload within about two seconds of
 you stopping typing. Changes made on *another* device take up to the poll
-interval to arrive — **30 seconds by default**. The Proton Drive API has no push
+interval to arrive — **30 seconds by default**, every 15 seconds for a few
+minutes after anything changes, and less often (up to every 5 minutes) when
+nothing has happened for a while or the window is hidden. The Proton Drive API has no push
 or websocket channel, so there is no way to do better than polling, and Proton's
 [usage guidelines](https://github.com/ProtonDriveApps/sdk#operational-requirements)
 ask third-party clients not to poll aggressively: an account that does can be
@@ -163,7 +182,7 @@ on one side only is not a conflict; it is just a sync.
 | Setting | What happens |
 | --- | --- |
 | **Keep both versions** (default) | This device's version keeps its filename. The other is saved beside it as `note (conflict 2026-09-18 1431 from laptop).md`. Both then sync everywhere. |
-| **Merge the changes** | Combines edits to different parts of a note — the usual shape after a device has been offline. Falls back to keeping both when the edits overlap, when the file is not text, or when the previous version is no longer in Drive's revision history. |
+| **Merge the changes** | Combines edits to different parts of a note, down to different words of the same line — the usual shape after a device has been offline. Falls back to keeping both when the edits overlap, when the file is not text, or when the previous version is no longer in Drive's revision history. |
 | **Keep whichever was edited last** | Uses modification times. Falls back to keeping both when they tie, or when Drive has no recorded time for the file. |
 | **Keep this device's / Keep Drive** | The chosen side keeps the filename; the other is kept as a conflict copy unless you turn copies off. |
 | **Ask me each time** | Nothing is written. The file is skipped until you choose, via **Show sync conflicts** in the command palette or the status bar's right-click menu. |
@@ -200,8 +219,11 @@ Two cases ignore the setting, because there is no second version to choose
 between: if a file was **deleted on one device and edited on the other**, the
 edit always wins. A deletion can be repeated; a lost edit cannot be recovered.
 
-Deletions that *aren't* contested do propagate, and locally they go to the system
-trash rather than being erased. A file is only removed from the vault when Drive
+Deletions that *aren't* contested do propagate, and locally a deleted note goes
+wherever you chose under **Settings → Files and links → Deleted files** (system
+trash, the vault's `.trash` folder, or permanently), as if you had deleted it
+yourself. Files in the config folder, which Obsidian does not index, go to the
+system trash. A file is only removed from the vault when Drive
 confirms it was deleted or trashed. A file that is merely missing from the Drive
 folder — moved elsewhere in Drive, or not found because a request failed — is
 kept, and uploaded again if needed.
@@ -235,6 +257,24 @@ While a sync runs, the status bar shows how many files of the current pass have
 been checked (`Syncing 120/4000`), or the progress of a large transfer
 (`↑ lecture.mp4 45%`). When idle, it says how long ago the last sync finished.
 
+The dot beside the icon is about the note you are looking at: pulsing green
+when it is in sync, pulsing red when it has changes that have not reached Drive
+yet (hover for why), grey when it is excluded from sync. On mobile it appears in
+the note's header instead, turns into a spinning sync icon while that note
+transfers, and opens the sync panel when tapped.
+
+The sync panel's **Not synced yet** list shows every change still waiting, with
+the reason: about to sync, uploading or downloading, waiting for Wi-Fi, failed
+and retrying (with when it tries next), over this device's size limit, a name
+clash, or a conflict waiting for you. Tap a file to open it.
+
+**Notes open in an editor.** When a new version of a note arrives while it is
+open, it is brought into the editor as an edit, so the cursor stays where it is.
+If you have typing that is not saved yet, the two are merged in the editor
+instead of the file being replaced underneath you; once Obsidian saves, the
+merged note goes up without a conflict copy. Only typing that overlaps the
+incoming change is left for your conflict setting to settle.
+
 If something goes wrong, **Copy sync log** (in the command palette, or under
 **Recent activity** in settings) copies the recent log with the plugin and
 Obsidian versions, ready to paste into a bug report. It includes file names, so
@@ -261,16 +301,23 @@ devices never need to be online together. What to expect when they are:
 - **The same note edited on two devices before either syncs** is a conflict,
   resolved by your conflict setting. By default both versions are kept.
 - **The same note saved on two devices within seconds of each other.** Drive
-  has no way to reject an upload because another one just landed, so both
-  succeed. After each upload the plugin checks the file's revision history, and
-  keeps a version it has just replaced as a conflict copy. Nothing is lost, but
-  you may see a conflict copy for what felt like one edit.
+  has no way to reject an upload because another one just landed. So right
+  before uploading, the plugin asks Drive for the note's latest version; if
+  another device's edit is already there, it is handled as a conflict (merged,
+  with "Merge the changes") instead of being uploaded over. If the other edit
+  lands in the moment between that check and the upload, the revision history
+  check after the upload keeps it as a conflict copy. Nothing is lost either
+  way.
 - **A new note with the same name created on two devices** is a conflict too,
   resolved the same way.
 - **A note deleted on one device while it is edited on another**: the edit
-  wins, as above. If the deletion reaches Drive in the moment between the other
-  device's check and its upload, the edit ends up in the Drive trash, where you
-  can restore it.
+  wins, as above. The deleting device checks, right before it trashes the note
+  on Drive, that no newer version has arrived, and leaves it alone if one has.
+  Only if the edit lands in the fraction of a second between that check and the
+  trash does it end up in the Drive trash, where you can restore it.
+- **A note saved here while a newer version of it is downloading**: the file is
+  checked again right before the download replaces it, so your edit is not
+  overwritten; the two versions are handled as a conflict instead.
 - **Renames on two devices at once**: the last one to reach Drive wins, and the
   other device follows it.
 - **"Keep whichever was edited last"** compares modification times from
@@ -281,9 +328,14 @@ devices never need to be online together. What to expect when they are:
 - **Changes from other devices arrive** on the next Drive check, 30 seconds by
   default.
 - **Names that differ only in letter case**, such as `Note.md` and `note.md`, can
-  exist side by side on Drive, Linux and Android. They are the same file on
-  Windows, macOS and iOS. Such pairs are left alone, with a warning in the
-  plugin's log, until you rename one of them.
+  exist side by side on Drive and Linux, but are one file on Windows, macOS,
+  iOS and usually Android. On a device that can keep them apart, both simply
+  sync. On one that cannot, the plugin settles the clash on Drive: the name
+  that was already synced, or the one in this vault, stays, and the other is
+  renamed to `note (case conflict).md`, so both keep syncing everywhere. The
+  same goes for folders, such as `Notes` and `notes`. Each rename shows up in the
+  conflict notice and history. A pair that cannot be renamed is left unsynced,
+  and you are told.
 - **On Windows, a file open in another program** (a video in a player, say) may
   be locked, and an update to it waits until the next sync after it is closed.
 
@@ -311,7 +363,11 @@ tests rather than anecdotes.
 | `src/proton/account/` | Vendored from Proton's SDK repo — see its `VENDORED.md`. |
 
 Run the tests with `npm test` and the Obsidian review rules with `npm run lint`;
-CI runs both. The tests cover the reconciliation table, the merge, the diff,
+CI runs both. `tests/simulation.test.ts` runs three simulated devices through
+random sequences of edits, renames, deletions, restarts and missed events, and
+checks that they always end up with the same notes and that no typed text is
+lost. Set `SIM_SEEDS` and `SIM_STEPS` to run more of them, or `SIM_SEED` to
+replay a failing one. The tests cover the reconciliation table, the merge, the diff,
 path filtering, the state store and the HTTP transport — everything that can be
 exercised without a real vault and a real Proton account.
 
@@ -326,7 +382,11 @@ saved by version 0.1.0 in `session.json` are moved into secret storage on the
 first launch, and the file is deleted.
 
 The sync state in `sync-state.json` holds paths, node ids and content hashes. No
-file contents, and no key material.
+file contents, and no key material. It is saved so that a crash or a killed app
+never leaves only a half-written copy: the new state is written beside it and
+then swapped in, with the previous copy kept as `sync-state.json.bak`. If no
+copy can be read, the plugin says so and pauses, showing what a sync would do
+before anything moves, instead of quietly starting from scratch.
 
 **Signing out ends the session on Proton's side** (`DELETE /auth/v4`) before
 the local copy is deleted, so a copy of it that anyone might have taken stops
@@ -388,11 +448,14 @@ and why it is there.
   on the device before they leave it.
 - **Filesystem access outside the vault API (desktop only).** On desktop, files
   over 32 MB are streamed with Node's `fs` and hashed with Node's `crypto`
-  instead of being read whole into memory, and downloads are written to a
-  temporary file beside the target and renamed into place once complete. Only
-  paths inside the vault are opened, resolved through the adapter's own
-  `getFullPath`. On mobile, where there is no Node, everything goes through the
-  adapter and large files are read whole.
+  instead of being read whole into memory, and large downloads are written to a
+  temporary file in the plugin's own folder and moved into place once complete;
+  one left unfinished by a crash is cleared at the next start. Only paths inside
+  the vault are opened, resolved through the adapter's own `getFullPath`. On
+  mobile, where there is no Node, everything goes through the adapter and large
+  files are read whole. Everywhere else, notes are written, renamed and deleted
+  through Obsidian's Vault API, and settings files in the config folder, which
+  that API cannot reach, through the adapter.
 - **No telemetry.** The Drive SDK's metrics are dropped, not sent (see
   `src/proton/telemetry.ts`).
 - **Clipboard.** Write only, and only when you ask: "Copy link" in the sign-in

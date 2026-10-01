@@ -26,8 +26,32 @@ function memoryAdapter(seed: Record<string, string> = {}) {
         async write(path: string, data: string) {
             files.set(path, data);
         },
+        ...renameAndRemove(files),
     } as unknown as DataAdapter;
     return { adapter, files };
+}
+
+/**
+ * Rename and remove as Obsidian's adapters do them; rename refuses to replace
+ * an existing file, which the state must never rely on.
+ */
+function renameAndRemove(files: Map<string, string>) {
+    return {
+        async rename(from: string, to: string) {
+            if (files.has(to)) {
+                throw new Error(`Destination file already exists: ${to}`);
+            }
+            const value = files.get(from);
+            if (value === undefined) {
+                throw new Error(`no such file: ${from}`);
+            }
+            files.delete(from);
+            files.set(to, value);
+        },
+        async remove(path: string) {
+            files.delete(path);
+        },
+    };
 }
 
 const base = (hash: string, revisionUid = 'rev-1'): SyncBase => ({
@@ -226,5 +250,85 @@ function memoryAdapterFrom(files: Map<string, string>): DataAdapter {
         async write(path: string, data: string) {
             files.set(path, data);
         },
+        ...renameAndRemove(files),
     } as unknown as DataAdapter;
 }
+
+describe('SyncState — surviving a crash mid-write (issue #7)', () => {
+    async function savedState() {
+        const { adapter, files } = memoryAdapter();
+        const state = new SyncState(adapter, FILE, SILENT);
+        await state.load('a@b.c', 'folder-1');
+        state.setSynced('note.md', 'node-1', 'file', base('h1'));
+        await state.flush();
+        state.setSynced('other.md', 'node-2', 'file', base('h2'));
+        await state.flush();
+        return { adapter, files };
+    }
+
+    async function reload(adapter: DataAdapter) {
+        const state = new SyncState(adapter, FILE, SILENT);
+        await state.load('a@b.c', 'folder-1');
+        return state;
+    }
+
+    it('keeps the previous good copy as a backup, and leaves no temporary file behind', async () => {
+        const { files } = await savedState();
+        assert.ok(files.has(FILE));
+        assert.ok(files.has(`${FILE}.bak`));
+        assert.ok(!files.has(`${FILE}.tmp`));
+    });
+
+    it('falls back to the backup when the file is torn', async () => {
+        const { adapter, files } = await savedState();
+        files.set(FILE, files.get(FILE)!.slice(0, 20));
+
+        const state = await reload(adapter);
+        assert.equal(state.wasLost(), false);
+        assert.equal(state.get('note.md')?.nodeUid, 'node-1');
+    });
+
+    it('uses a finished temporary file when the crash came before it was moved into place', async () => {
+        const { adapter, files } = await savedState();
+        // The moment between moving the old file aside and the new one in.
+        files.set(`${FILE}.tmp`, files.get(FILE)!);
+        files.delete(FILE);
+
+        const state = await reload(adapter);
+        assert.equal(state.get('other.md')?.nodeUid, 'node-2');
+    });
+
+    it('prefers the intact file over a temporary one torn by a crash during the write', async () => {
+        const { adapter, files } = await savedState();
+        files.set(`${FILE}.tmp`, '{"version":1,"rec');
+
+        const state = await reload(adapter);
+        assert.equal(state.get('other.md')?.nodeUid, 'node-2');
+    });
+
+    it('reports the state lost, instead of starting afresh quietly, when no copy can be read', async () => {
+        const { adapter, files } = await savedState();
+        files.set(FILE, 'garbage');
+        files.set(`${FILE}.bak`, '');
+
+        const state = await reload(adapter);
+        assert.equal(state.wasLost(), true);
+        assert.deepEqual(state.paths(), []);
+    });
+
+    it('treats no file at all as a first sync, not a loss', async () => {
+        const state = await reload(memoryAdapter().adapter);
+        assert.equal(state.wasLost(), false);
+    });
+
+    it('does not bring a deliberately reset state back from the backup', async () => {
+        const { adapter, files } = await savedState();
+        const state = await reload(adapter);
+        await state.reset();
+        assert.ok(!files.has(`${FILE}.bak`));
+        files.set(FILE, 'garbage');
+
+        const reloaded = await reload(adapter);
+        assert.equal(reloaded.get('note.md'), undefined);
+    });
+});

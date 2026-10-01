@@ -1,7 +1,7 @@
 import { Menu, setIcon, setTooltip } from 'obsidian';
 
 import type { SyncSummary } from '../sync/engine';
-import { statusDescription, statusDetails, statusIcon, statusLabel } from './syncStatus';
+import { type NoteIndicator, statusDescription, statusDetails, statusIcon, statusLabel } from './syncStatus';
 
 export type StatusBarActions = {
     syncNow: () => void;
@@ -25,6 +25,7 @@ export type StatusBarActions = {
  */
 export class StatusBar {
     private summary: SyncSummary | null = null;
+    private note: NoteIndicator | null = null;
 
     constructor(
         private readonly element: HTMLElement,
@@ -49,6 +50,14 @@ export class StatusBar {
         this.render();
     }
 
+    /** The note in view, for the dot beside the icon; null when no note is open. */
+    setNote(note: NoteIndicator | null): void {
+        this.note = note;
+        if (this.summary) {
+            this.render();
+        }
+    }
+
     /** Re-render with the last summary, so "synced 2m ago" keeps counting. */
     refresh(): void {
         if (this.summary) {
@@ -65,12 +74,16 @@ export class StatusBar {
         if (summary.status === 'syncing') {
             icon.addClass('proton-drive-sync-spin');
         }
+        if (this.note) {
+            this.element.createSpan({ cls: `proton-drive-sync-note-dot mod-${this.note.state}` });
+        }
 
         this.element.createSpan({ text: ` ${statusLabel(summary)}` });
         setTooltip(
             this.element,
             [
                 `Proton Drive Sync: ${statusDescription(summary)}`,
+                ...(this.note ? [this.note.text] : []),
                 ...statusDetails(summary),
                 summary.status === 'paused'
                     ? 'Click to resume.'

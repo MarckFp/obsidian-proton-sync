@@ -152,7 +152,9 @@ export class ConflictResolver {
         try {
             const [baseBytes, remoteBytes] = await Promise.all([
                 this.drive.downloadRevision(base.remoteRevisionUid),
-                this.drive.downloadFile(remote.nodeUid),
+                // The revision the conflict was found on, not whatever is
+                // active by now, so the merge sees the version it decided on.
+                this.drive.downloadRevision(remote.revisionUid),
             ]);
             baseText = decodeUtf8(baseBytes);
             remoteText = decodeUtf8(remoteBytes);

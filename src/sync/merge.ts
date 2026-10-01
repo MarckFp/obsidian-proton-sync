@@ -1,11 +1,16 @@
 /**
- * Line-level three-way merge, used by the `merge` conflict policy.
+ * Three-way merge, used by the `merge` conflict policy.
  *
  * When two devices edit different parts of the same note — the common shape of
  * a conflict after one of them has been offline — there is a correct answer
  * that keeps both edits, and producing it beats handing the user two files to
  * diff by hand. When the edits genuinely overlap there is no correct answer,
  * and this returns nothing so the caller can fall back to keeping both copies.
+ *
+ * Lines first, then words: where both sides changed the same lines, those
+ * lines are merged again word by word, so a typo fixed on one device and a
+ * sentence added to the same paragraph on another still combine. Only edits
+ * that overlap at the word level as well are refused.
  *
  * Deliberately conservative: adjacent edits are treated as overlapping rather
  * than interleaved, and anything too large to diff cheaply is declined. A
@@ -22,20 +27,50 @@ export type MergeResult =
 
 type Region = { baseStart: number; baseEnd: number; otherStart: number; otherEnd: number };
 
+type UnitMerge = { units: string[] } | { refused: 'overlapping-edits' | 'too-large' };
+
 export function mergeThreeWay(baseText: string, localText: string, remoteText: string): MergeResult {
     if (hasNullByte(baseText) || hasNullByte(localText) || hasNullByte(remoteText)) {
         return { merged: false, reason: 'binary' };
     }
 
     const newline = detectNewline(localText, remoteText, baseText);
-    const base = splitLines(baseText);
-    const local = splitLines(localText);
-    const remote = splitLines(remoteText);
+    const result = mergeUnits(splitLines(baseText), splitLines(localText), splitLines(remoteText), mergeWords);
+    if ('refused' in result) {
+        return { merged: false, reason: result.refused };
+    }
+    return { merged: true, text: result.units.join(newline) };
+}
 
+/**
+ * Lines both sides changed, merged word by word; null when the edits overlap
+ * there too. Whitespace counts as a word of its own, so spacing survives.
+ */
+function mergeWords(base: string[], local: string[], remote: string[]): string[] | null {
+    const words = (lines: string[]) => lines.join('\n').match(/\s+|[^\s]+/g) ?? [];
+    const result = mergeUnits(words(base), words(local), words(remote));
+    if ('refused' in result) {
+        return null;
+    }
+    const text = result.units.join('');
+    return text === '' ? [] : text.split('\n');
+}
+
+/**
+ * The merge itself, over any sequence: lines or words. `onOverlap` gets a
+ * stretch both sides changed differently and may still merge it, which is how
+ * the line pass hands such stretches to the word pass.
+ */
+function mergeUnits(
+    base: string[],
+    local: string[],
+    remote: string[],
+    onOverlap?: (base: string[], local: string[], remote: string[]) => string[] | null,
+): UnitMerge {
     const localRegions = diffRegions(base, local);
     const remoteRegions = diffRegions(base, remote);
     if (localRegions === null || remoteRegions === null) {
-        return { merged: false, reason: 'too-large' };
+        return { refused: 'too-large' };
     }
 
     const output: string[] = [];
@@ -67,14 +102,18 @@ export function mergeThreeWay(baseText: string, localText: string, remoteText: s
         } else if (sameLines(remoteSlice, baseSlice)) {
             output.push(...localSlice);
         } else {
-            return { merged: false, reason: 'overlapping-edits' };
+            const merged = onOverlap?.(baseSlice, localSlice, remoteSlice) ?? null;
+            if (merged === null) {
+                return { refused: 'overlapping-edits' };
+            }
+            output.push(...merged);
         }
 
         baseCursor = span.baseEnd;
     }
 
     output.push(...base.slice(baseCursor));
-    return { merged: true, text: output.join(newline) };
+    return { units: output };
 }
 
 type Span = { baseStart: number; baseEnd: number; touchedByLocal: boolean; touchedByRemote: boolean };
