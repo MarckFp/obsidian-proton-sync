@@ -313,7 +313,10 @@ export class VaultIO {
                 size: data.byteLength,
                 sha1: hash,
                 modificationTime: new Date(stat.mtime),
-                thumbnails: await imageThumbnails(data, mediaType),
+                // Thumbnails are a convenience for Drive's own apps, which make
+                // their own when missing; on a phone, decoding every image to
+                // make one costs battery and time for nothing the user sees.
+                thumbnails: Platform.isMobile ? [] : await imageThumbnails(data, mediaType),
                 stream: () => streamOf(data),
                 replay: true,
             },

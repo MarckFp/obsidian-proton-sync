@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { setRequestUrlHandler, type RequestUrlParam } from './stubs/obsidian';
+import { serverTime, serverTimeWithUpdateTimestamp } from '@protontech/crypto/serverTime';
+
 import { obsidianFetch } from '../src/proton/obsidianFetch';
 
 function capture(response: Partial<{ status: number; headers: Record<string, string>; body: string }> = {}) {
@@ -83,5 +85,26 @@ describe('obsidianFetch', () => {
 
         assert.equal(response.status, 204);
         assert.equal(response.body, null);
+    });
+});
+
+describe('obsidianFetch — following Proton’s clock', () => {
+    it('sets the crypto library’s server time from the Date header, stamped with when the request was sent', async () => {
+        // An hour ahead of this machine, as a device with a slow clock would see it.
+        const server = new Date(Math.floor(Date.now() / 1000) * 1000 + 60 * 60_000);
+        capture({ headers: { date: server.toUTCString() } });
+        const before = Date.now();
+        await obsidianFetch('https://drive-api.proton.me/core/v4/users');
+
+        assert.equal(serverTime().getTime(), server.getTime());
+        const { serverTimeUpdatedAt } = serverTimeWithUpdateTimestamp();
+        assert.ok(serverTimeUpdatedAt.getTime() >= before - 5 && serverTimeUpdatedAt.getTime() <= Date.now());
+    });
+
+    it('ignores a response without a usable Date header', async () => {
+        const current = serverTime().getTime();
+        capture({ headers: { date: 'not a date' } });
+        await obsidianFetch('https://drive-api.proton.me/core/v4/users');
+        assert.ok(Math.abs(serverTime().getTime() - current) < 1000);
     });
 });

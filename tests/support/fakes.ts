@@ -230,6 +230,10 @@ type FakeNode = {
     name: string;
     type: 'file' | 'folder';
     trashed: boolean;
+    /** When it went to the trash, epoch ms. */
+    trashedAt?: number;
+    /** Its public link, if shared. */
+    link?: { url: string; customPassword?: string; expirationTime?: Date };
     /** The active revision; `history` holds every revision, oldest first. */
     revision?: FakeRevision;
     history: FakeRevision[];
@@ -339,11 +343,24 @@ export class FakeDrive {
     }
 
     /** Simulate another device deleting a file: it goes to Drive's trash. */
-    trash(path: string): void {
+    trash(path: string, at = Date.now()): void {
         const node = this.at(path);
         if (node) {
             node.trashed = true;
+            node.trashedAt = at;
         }
+    }
+
+    /** A trashed node by its path, which {@link at} does not find. */
+    trashedAt(path: string): FakeNode | undefined {
+        const names = path.split('/');
+        let parent: string | undefined = SYNC_ROOT;
+        let found: FakeNode | undefined;
+        for (const name of names) {
+            found = [...this.nodes.values()].find((node) => node.parentUid === parent && node.name === name);
+            parent = found?.uid;
+        }
+        return found;
     }
 
     /** Simulate another device writing a file. */
@@ -463,9 +480,42 @@ export class FakeDrive {
                     };
                 }
             },
+            async *iterateTrashedNodeUids() {
+                for (const node of drive.nodes.values()) {
+                    if (node.trashed) {
+                        yield node.uid;
+                    }
+                }
+            },
+            async *restoreNodes(uids: string[]) {
+                for (const uid of uids) {
+                    const node = drive.nodes.get(uid)!;
+                    node.trashed = false;
+                    delete node.trashedAt;
+                    drive.changed(node, DriveEventType.NodeUpdated);
+                    yield { uid, ok: true };
+                }
+            },
+            async getSharingInfo(uid: string) {
+                const link = drive.nodes.get(uid)!.link;
+                return link ? { protonInvitations: [], nonProtonInvitations: [], members: [], urlAccess: drive.urlAccess(link) } : undefined;
+            },
+            async shareNode(uid: string, settings: { urlAccess: { customPassword?: string; expiration?: Date } }) {
+                const node = drive.nodes.get(uid)!;
+                node.link = {
+                    url: node.link?.url ?? `https://drive.proton.me/urls/${uid}#generated`,
+                    ...(settings.urlAccess.customPassword !== undefined && { customPassword: settings.urlAccess.customPassword }),
+                    ...(settings.urlAccess.expiration !== undefined && { expirationTime: settings.urlAccess.expiration }),
+                };
+                return { protonInvitations: [], nonProtonInvitations: [], members: [], urlAccess: drive.urlAccess(node.link) };
+            },
+            async unshareNode(uid: string) {
+                delete drive.nodes.get(uid)!.link;
+            },
             async *trashNodes(uids: string[]) {
                 for (const uid of uids) {
                     drive.nodes.get(uid)!.trashed = true;
+                    drive.nodes.get(uid)!.trashedAt = Date.now();
                     drive.changed(drive.nodes.get(uid)!, DriveEventType.NodeUpdated);
                     yield { uid, ok: true };
                 }
@@ -580,7 +630,7 @@ export class FakeDrive {
             parentUid: node.parentUid,
             name: { ok: true, value: node.name },
             type: node.type,
-            trashTime: node.trashed ? new Date() : undefined,
+            trashTime: node.trashed ? new Date(node.trashedAt ?? Date.now()) : undefined,
             treeEventScopeId: 'scope',
             activeRevision: node.revision && {
                 uid: node.revision.uid,
@@ -589,6 +639,10 @@ export class FakeDrive {
                 claimedModificationTime: node.revision.mtime,
             },
         };
+    }
+
+    private urlAccess(link: NonNullable<FakeNode['link']>) {
+        return { uid: 'link', creationTime: new Date(), role: 'viewer', numberOfInitializedDownloads: 0, ...link };
     }
 
     private liveChildren(parentUid: string): FakeNode[] {

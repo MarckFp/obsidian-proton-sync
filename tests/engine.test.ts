@@ -1308,35 +1308,33 @@ describe('SyncEngine — checking Drive just before uploading', () => {
 });
 
 describe('SyncEngine — adapting how often Drive is checked', () => {
-    it('checks more often right after a change, less after a quiet spell, and least while hidden', async () => {
+    it('follows Proton’s pace: 30 s after a change, the setting otherwise, 10 min idle or hidden', async () => {
         let hidden = false;
         const { vault, engine } = await setup({
-            settings: { remotePollSeconds: 30 },
+            settings: { remotePollSeconds: 60 },
             environment: { isMobile: false, isMetered: () => false, isHidden: () => hidden },
         });
-        const now = Date.now();
-
-        // Nothing has happened yet: the quiet pace.
-        assert.equal(engine.pollIntervalSeconds(now), 120);
+        // Just opened: the active pace, then the setting, then the background pace.
+        assert.equal(engine.pollIntervalSeconds(Date.now()), 30);
+        assert.equal(engine.pollIntervalSeconds(Date.now() + 5 * 60_000), 60);
+        assert.equal(engine.pollIntervalSeconds(Date.now() + 11 * 60_000), 600);
 
         vault.write('note.md', 'typed');
         engine.onVaultChange('note.md');
-        assert.equal(engine.pollIntervalSeconds(Date.now()), 15);
-        assert.equal(engine.pollIntervalSeconds(Date.now() + 5 * 60_000), 30);
-        assert.equal(engine.pollIntervalSeconds(Date.now() + 11 * 60_000), 120);
+        assert.equal(engine.pollIntervalSeconds(Date.now()), 30);
+        assert.equal(engine.pollIntervalSeconds(Date.now() + 5 * 60_000), 60);
+        assert.equal(engine.pollIntervalSeconds(Date.now() + 11 * 60_000), 600);
 
         hidden = true;
-        assert.equal(engine.pollIntervalSeconds(Date.now()), 120);
+        assert.equal(engine.pollIntervalSeconds(Date.now()), 600);
     });
 
-    it('never goes below the minimum, nor above five minutes', async () => {
+    it('never goes faster than Proton’s 30 seconds, whatever the setting', async () => {
         const fast = await setup({ settings: { remotePollSeconds: 15 } });
         fast.vault.write('note.md', 'x');
         fast.engine.onVaultChange('note.md');
-        assert.equal(fast.engine.pollIntervalSeconds(), 15);
-
-        const slow = await setup({ settings: { remotePollSeconds: 200 } });
-        assert.equal(slow.engine.pollIntervalSeconds(), 300);
+        assert.equal(fast.engine.pollIntervalSeconds(), 30);
+        assert.equal(fast.engine.pollIntervalSeconds(Date.now() + 5 * 60_000), 30);
     });
 });
 
@@ -1570,5 +1568,126 @@ describe('SyncEngine — progress while a sync runs', () => {
         assert.ok(fractions.at(-1)! - fractions[0] > 0.5, `moves with the transfers: ${fractions}`);
         assert.equal(samples.at(-1)!.done, samples.at(-1)!.total, 'every file checked before the last transfer');
         assert.equal(engine.getSummary().progressFraction, null, 'nothing to measure once done');
+    });
+});
+
+describe('SyncEngine — the daily walk of the whole folder', () => {
+    it('waits for a quiet moment instead of running at start-up or mid-use', async () => {
+        let hidden = false;
+        const vault = new MemoryVault();
+        vault.mkdir(PLUGIN_DIR);
+        vault.write('note.md', 'v1');
+        const { drive, engine, state, settled } = await setup({
+            vault,
+            environment: { isMobile: false, isMetered: () => false, isHidden: () => hidden },
+        });
+        state.setLastFullSync(Date.now() - 25 * 60 * 60_000);
+        const listingsBefore = drive.listings;
+
+        // Due, but Obsidian is in use: an ordinary check.
+        engine.pollNow();
+        await settled();
+        assert.equal(drive.listings, listingsBefore);
+
+        // Window hidden: a quiet moment, so the walk runs.
+        hidden = true;
+        engine.pollNow();
+        await settled();
+        assert.ok(drive.listings > listingsBefore);
+        assert.ok(Date.now() - state.getLastFullSync()! < 60_000);
+    });
+});
+
+describe('SyncEngine — sharing a note', () => {
+    it('makes, reads and removes a note’s public link, with its password and expiry', async () => {
+        const vault = new MemoryVault();
+        vault.write('note.md', 'hello');
+        const { engine } = await setup({ vault });
+
+        assert.equal(await engine.noteShareLink('note.md'), null);
+        const expiration = new Date(Date.now() + 86_400_000);
+        const made = await engine.createNoteShareLink('note.md', { password: 'secret', expiration });
+        assert.match(made.url, /^https:\/\/drive\.proton\.me\/urls\//);
+        assert.equal(made.hasPassword, true);
+        assert.equal(made.expiration?.getTime(), expiration.getTime());
+
+        const found = await engine.noteShareLink('note.md');
+        assert.equal(found?.url, made.url);
+
+        await engine.removeNoteShareLink('note.md');
+        assert.equal(await engine.noteShareLink('note.md'), null);
+    });
+
+    it('refuses a note that is not on Drive yet', async () => {
+        const { engine } = await setup();
+        await assert.rejects(engine.noteShareLink('never-synced.md'), /not on Proton Drive yet/);
+    });
+});
+
+describe('SyncEngine — recently deleted', () => {
+    it('lists the vault’s files in Drive’s trash, newest first, and restores one into the vault', async () => {
+        const vault = new MemoryVault();
+        vault.write('old.md', 'old');
+        vault.write('notes/new.md', 'new');
+        vault.write('kept.md', 'kept');
+        const { drive, engine, settled } = await setup({ vault });
+        drive.autoEvents = true;
+        drive.trash('old.md', 1_000);
+        drive.trash('notes/new.md', 2_000);
+        // Something else in the account's trash, outside the synced folder.
+        drive.nodes.set('elsewhere', {
+            uid: 'elsewhere',
+            parentUid: VOLUME_ROOT,
+            name: 'taxes.pdf',
+            type: 'file',
+            trashed: true,
+            trashedAt: 3_000,
+            history: [],
+        });
+
+        const items = await engine.recentlyDeleted();
+        assert.deepEqual(
+            items.map((item) => item.path),
+            ['notes/new.md', 'old.md'],
+        );
+
+        await engine.restoreDeleted(items[1]);
+        await settled();
+        engine.pollNow();
+        await settled();
+        assert.equal(drive.text('old.md'), 'old');
+        assert.deepEqual(
+            (await engine.recentlyDeleted()).map((item) => item.path),
+            ['notes/new.md'],
+        );
+    });
+
+    it('places a file inside a trashed folder, and restores the folder with it', async () => {
+        const vault = new MemoryVault();
+        vault.write('projects/plan.md', 'plan');
+        const { drive, engine } = await setup({ vault });
+        drive.trash('projects/plan.md', 1_000);
+        drive.trash('projects', 2_000);
+
+        const [item] = await engine.recentlyDeleted();
+        assert.equal(item.path, 'projects/plan.md');
+        assert.equal(item.withFolder, 'projects');
+        assert.deepEqual(item.restoreUids, [drive.trashedAt('projects')!.uid, drive.trashedAt('projects/plan.md')!.uid]);
+
+        await engine.restoreDeleted(item);
+        assert.equal(drive.text('projects/plan.md'), 'plan');
+    });
+
+    it('lists a folder trashed as a whole for itself', async () => {
+        const vault = new MemoryVault();
+        vault.write('archive/a.md', 'a');
+        const { drive, engine } = await setup({ vault });
+        drive.trash('archive', 1_000);
+
+        const items = await engine.recentlyDeleted();
+        assert.deepEqual(
+            items.map((item) => [item.path, item.isFolder]),
+            [['archive', true]],
+        );
     });
 });

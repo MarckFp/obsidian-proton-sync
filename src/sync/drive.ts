@@ -1,10 +1,12 @@
 import {
+    MemberRole,
     NodeType,
     type FileDownloader,
     type NodeEntity,
     type ProtonDriveClient,
     type Revision,
     type Thumbnail,
+    type URLAccess,
 } from '@protontech/drive-sdk';
 
 import type { Logger } from '../util/logger';
@@ -383,6 +385,61 @@ export class DriveIO {
         return latest?.uid ?? null;
     }
 
+    /** A node's public link, if it has one. */
+    async shareLink(nodeUid: string): Promise<ShareLink | null> {
+        return toShareLink((await this.client.getSharingInfo(nodeUid))?.urlAccess);
+    }
+
+    /**
+     * Give a node a public link: read-only, optionally behind a password and
+     * with an expiry. An existing link is updated with these settings.
+     */
+    async createShareLink(nodeUid: string, options: { password?: string; expiration?: Date }): Promise<ShareLink> {
+        const result = await this.client.shareNode(nodeUid, {
+            urlAccess: {
+                role: MemberRole.Viewer,
+                ...(options.password ? { customPassword: options.password } : {}),
+                ...(options.expiration ? { expiration: options.expiration } : {}),
+            },
+        });
+        const link = toShareLink(result.urlAccess);
+        if (!link) {
+            throw new Error('Proton Drive did not return a link');
+        }
+        return link;
+    }
+
+    /** Remove a node's public link; anyone holding it can no longer open it. */
+    async removeShareLink(nodeUid: string): Promise<void> {
+        await this.client.unshareNode(nodeUid, { urlAccess: 'remove' });
+    }
+
+    /** Everything in the account's trash, as nodes. */
+    async listTrashed(): Promise<NodeEntity[]> {
+        const uids: string[] = [];
+        for await (const uid of this.client.iterateTrashedNodeUids()) {
+            uids.push(uid);
+        }
+        const nodes: NodeEntity[] = [];
+        for (let i = 0; i < uids.length; i += LOOKUP_BATCH) {
+            for await (const node of this.client.iterateNodes(uids.slice(i, i + LOOKUP_BATCH))) {
+                if (!('missingUid' in node)) {
+                    nodes.push(node);
+                }
+            }
+        }
+        return nodes;
+    }
+
+    /** Take nodes out of the trash, back to where they were. */
+    async restoreNodes(nodeUids: string[]): Promise<void> {
+        for await (const result of this.client.restoreNodes(nodeUids)) {
+            if (!result.ok) {
+                throw result.error;
+            }
+        }
+    }
+
     async trashNode(nodeUid: string): Promise<void> {
         for await (const result of this.client.trashNodes([nodeUid])) {
             if (!result.ok) {
@@ -426,6 +483,27 @@ export class DriveIO {
             );
         }
     }
+}
+
+/** A public link to a file, as the share dialog shows it. */
+export type ShareLink = {
+    url: string;
+    expiration?: Date;
+    hasPassword: boolean;
+    /** How often it has been opened for download. */
+    downloads: number;
+};
+
+function toShareLink(access: URLAccess | undefined): ShareLink | null {
+    if (!access) {
+        return null;
+    }
+    return {
+        url: access.url,
+        ...(access.expirationTime !== undefined && { expiration: access.expirationTime }),
+        hasPassword: Boolean(access.customPassword),
+        downloads: access.numberOfInitializedDownloads,
+    };
 }
 
 /** Nodes per `iterateNodes` request. */

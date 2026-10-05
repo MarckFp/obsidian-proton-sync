@@ -2,6 +2,7 @@ import type { DataAdapter } from 'obsidian';
 
 import type { Logger } from '../util/logger';
 import type { SessionCredentials, SessionInfo } from './account';
+import { newCacheKey } from './persistentCache';
 import type { SecretSlot } from './secretStore';
 
 type StoredSession = {
@@ -12,6 +13,8 @@ type StoredSession = {
     userKeyPassword: string;
     telemetryEnabled: boolean;
     accountEmail?: string;
+    /** Encrypts the saved Drive metadata cache; kept here so it shares the session's protection. */
+    cacheKey?: string;
 };
 
 /** Where 0.1.0 kept the session, and how to read it back. */
@@ -69,6 +72,22 @@ export class Credentials implements SessionCredentials {
 
     getUserKeyPassword(): string | undefined {
         return this.session?.userKeyPassword;
+    }
+
+    /**
+     * The key the saved Drive cache is encrypted with, created with the first
+     * session that needs one. Stored inside the session, so the PIN protects it
+     * and signing out removes it. Null when there is no session.
+     */
+    async cacheKey(): Promise<string | null> {
+        if (!this.session) {
+            return null;
+        }
+        if (!this.session.cacheKey) {
+            this.session.cacheKey = newCacheKey();
+            await this.persist();
+        }
+        return this.session.cacheKey;
     }
 
     async load(): Promise<void> {

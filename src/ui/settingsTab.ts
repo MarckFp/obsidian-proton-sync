@@ -316,11 +316,9 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                     desc:
                         `Seconds between checks for changes from other devices (minimum ${MIN_POLL_SECONDS}). ` +
                         'Proton Drive has no push channel, so this interval is the delay before a change made ' +
-                        'elsewhere appears here. It adapts around this value: twice as often for a few minutes ' +
-                        'after any change, here or elsewhere, and up to four times less often (at most every 5 ' +
-                        'minutes) when nothing has happened for a while or the window is hidden. Proton rate-limits ' +
-                        'per account, and its guidelines ask third-party clients not to poll aggressively — lower ' +
-                        'this only if you need to.',
+                        'elsewhere appears here. It follows the pace of Proton’s own apps: every 30 seconds for a ' +
+                        'few minutes after any change, this often otherwise, and every 10 minutes when nothing has ' +
+                        'happened for a while or the window is hidden.',
                     aliases: ['poll', 'interval'],
                     control: {
                         type: 'number',

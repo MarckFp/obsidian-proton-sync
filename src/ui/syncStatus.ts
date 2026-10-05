@@ -154,6 +154,11 @@ export function statusDetails(summary: SyncSummary): string[] {
     if (summary.uploaded > 0 || summary.downloaded > 0) {
         lines.push(`Since Obsidian opened: ${summary.uploaded} uploaded, ${summary.downloaded} downloaded`);
     }
+    if (summary.requestsLastHour > 0) {
+        lines.push(
+            `${summary.requestsLastHour} request${summary.requestsLastHour === 1 ? '' : 's'} to Proton in the last hour`,
+        );
+    }
     if (summary.lastError) {
         lines.push(`Last error: ${summary.lastError}`);
     }

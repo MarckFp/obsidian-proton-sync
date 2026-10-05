@@ -76,7 +76,18 @@ export class SyncState {
         private readonly adapter: DataAdapter,
         private readonly filePath: string,
         private readonly logger: Logger,
+        /** Called after each save, so what must agree with the state (the Drive cache) is saved with it. */
+        private readonly afterFlush: () => void = () => undefined,
     ) {}
+
+    /**
+     * Where in Drive's event feed this state stands, as one string: what the
+     * saved Drive cache is checked against, since the cache is only current up
+     * to the events it has seen.
+     */
+    cursorsFingerprint(): string {
+        return JSON.stringify([...this.eventCursors].sort(([a], [b]) => a.localeCompare(b)));
+    }
 
     private get tempPath(): string {
         return `${this.filePath}.tmp`;
@@ -412,6 +423,7 @@ export class SyncState {
         this.writing = this.writing
             .catch(() => undefined)
             .then(() => this.writeAtomically(JSON.stringify(file)))
+            .then(() => this.afterFlush())
             .catch((error: unknown) => {
                 this.logger.error('Failed to write sync state', error);
                 // Put the change back so the next flush retries it.

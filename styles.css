@@ -450,3 +450,27 @@ button.proton-drive-sync-panel-version:hover {
         animation: none;
     }
 }
+
+/* "Recently deleted": the file and when, with its Restore button beside it. */
+.proton-drive-sync-panel-deleted {
+    display: flex;
+    align-items: center;
+    gap: var(--size-4-2);
+    padding: var(--size-4-2) var(--size-4-3);
+    border-radius: var(--radius-s);
+    background-color: var(--background-secondary);
+}
+
+.proton-drive-sync-panel-deleted-text {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--font-ui-small);
+    overflow-wrap: anywhere;
+}
+
+/* The share link, selectable in full. */
+.proton-drive-sync-share-url {
+    width: 100%;
+    font-family: var(--font-monospace);
+    font-size: var(--font-ui-small);
+}

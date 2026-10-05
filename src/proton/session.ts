@@ -1,11 +1,17 @@
 import { CryptoProxy } from '@protontech/crypto';
 import { Api as CryptoApi } from '@protontech/crypto/proxy/endpoint/api.ts';
 import { computeKeyPassword, generateKeySalt, getRandomSrpVerifier, getSrp } from '@protontech/crypto/srp';
-import { MemoryCache, OpenPGPCryptoWithCryptoProxy, ProtonDriveClient } from '@protontech/drive-sdk';
+import {
+    MemoryCache,
+    OpenPGPCryptoWithCryptoProxy,
+    ProtonDriveClient,
+    type ProtonDriveEntitiesCache,
+} from '@protontech/drive-sdk';
 import type { Logger } from '../util/logger';
 import { ApiClient, initAccount, type Addresses, type Auth, type Srp } from './account';
 import type { Credentials } from './credentials';
 import { HTTPClient } from './httpClient';
+import { cacheKeyBytes, EncryptedEntitiesCache, IndexedDbCacheStore } from './persistentCache';
 import { revokeSession } from './revoke';
 import { obsidianFetch } from './obsidianFetch';
 import { Telemetry } from './telemetry';
@@ -66,13 +72,32 @@ export class ProtonSession {
     private addresses: Addresses | null = null;
     private srp: Srp | null = null;
     private client: ProtonDriveClient | null = null;
+    /** The SDK's metadata cache, saved between sessions; see {@link EncryptedEntitiesCache}. */
+    private entitiesCache: EncryptedEntitiesCache | null = null;
 
     constructor(
         private readonly credentials: Credentials,
         private readonly clientUid: string,
         private readonly logger: Logger,
+        /** The event position the sync state stands at, recorded with each save of the cache. */
+        private readonly cacheMarker: () => string = () => '',
     ) {
         this.telemetry = new Telemetry(logger);
+    }
+
+    /** Keep the saved cache only if it matches the sync state's event position; see {@link EncryptedEntitiesCache.validate}. */
+    async validateCache(marker: string): Promise<void> {
+        await this.entitiesCache?.validate(marker);
+    }
+
+    /** Throw the saved cache away, when the sync state starts over. */
+    async clearCache(): Promise<void> {
+        await this.entitiesCache?.clear();
+    }
+
+    /** Save the cache now, together with the sync state. */
+    async flushCache(): Promise<void> {
+        await this.entitiesCache?.flush();
     }
 
     /**
@@ -111,7 +136,7 @@ export class ProtonSession {
         this.srp = account.srp;
 
         if (this.credentials.isLoggedIn()) {
-            this.buildClient(cryptoModule);
+            await this.buildClient(cryptoModule);
         }
     }
 
@@ -160,7 +185,7 @@ export class ProtonSession {
         const completion = auth
             .authViaWeb((signInUrl) => resolveUrl(signInUrl), signal)
             .then(async () => {
-                this.buildClient(initCryptoOnce());
+                await this.buildClient(initCryptoOnce());
 
                 const primary = await this.addresses!.getOwnPrimaryAddress();
                 await this.credentials.setAccountEmail(primary.email);
@@ -182,6 +207,10 @@ export class ProtonSession {
      * stored, encrypted; unlocking and `init` bring it back.
      */
     lock(): void {
+        // The cache is saved encrypted, and dropped from memory with the
+        // client, so nothing decrypted outlives the lock.
+        void this.entitiesCache?.flush();
+        this.entitiesCache = null;
         this.client = null;
         this.credentials.unload();
     }
@@ -199,6 +228,8 @@ export class ProtonSession {
      */
     async signOut(): Promise<{ revoked: boolean }> {
         const revoked = await this.revoke();
+        await this.entitiesCache?.clear();
+        this.entitiesCache = null;
         await this.credentials.signOut();
         this.client = null;
         return { revoked };
@@ -211,18 +242,20 @@ export class ProtonSession {
         return revokeSession(this.apiClient, this.logger);
     }
 
-    private buildClient(cryptoModule: OpenPGPCryptoWithCryptoProxy): void {
+    private async buildClient(cryptoModule: OpenPGPCryptoWithCryptoProxy): Promise<void> {
         if (!this.apiClient || !this.addresses || !this.srp) {
             throw new Error('Proton session is not initialised');
         }
+        const entitiesCache = await this.openEntitiesCache();
 
         this.client = new ProtonDriveClient({
             config: { baseUrl: DRIVE_API_URL, clientUid: this.clientUid },
             httpClient: new HTTPClient(this.apiClient),
-            // Held in memory only. Persisting these would mean writing node
-            // keys and session keys into the vault directory, and the cost of
-            // rebuilding them is a handful of requests after a restart.
-            entitiesCache: new MemoryCache(),
+            // File and folder metadata is saved between sessions, encrypted;
+            // see EncryptedEntitiesCache. Node and session keys are held in
+            // memory only: rebuilding them costs a few requests, and keys are
+            // not something to write to disk even encrypted.
+            entitiesCache,
             cryptoCache: new MemoryCache(),
             account: this.addresses,
             openPGPCryptoModule: cryptoModule,
@@ -231,5 +264,28 @@ export class ProtonSession {
             srpModule: this.srp,
             telemetry: this.telemetry,
         });
+    }
+
+    /**
+     * The saved metadata cache, or an in-memory one where it cannot be kept:
+     * no IndexedDB, or no session key to encrypt it with.
+     */
+    private async openEntitiesCache(): Promise<ProtonDriveEntitiesCache> {
+        const key = await this.credentials.cacheKey();
+        if (!key || !IndexedDbCacheStore.available()) {
+            return new MemoryCache();
+        }
+        try {
+            this.entitiesCache = await EncryptedEntitiesCache.open(
+                new IndexedDbCacheStore(`proton-drive-sync-cache-${this.clientUid}`),
+                cacheKeyBytes(key),
+                this.cacheMarker,
+                this.logger.getLogger('cache'),
+            );
+            return this.entitiesCache;
+        } catch (error) {
+            this.logger.warn('Could not open the saved Drive cache; keeping it in memory', error);
+            return new MemoryCache();
+        }
     }
 }

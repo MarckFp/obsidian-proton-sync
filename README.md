@@ -55,16 +55,28 @@ same implementation Proton's own clients use.
 - **Edits arriving while you type are merged in.** A new version of a note you
   have open is brought into the editor without moving the cursor, and if you
   have unsaved typing, merged with it rather than written underneath it.
+- **Share a note.** **Copy Proton Drive share link** (command palette, or the
+  link button beside the note's versions in the sync panel) makes a read-only
+  public link to the note on Drive, optionally with a password and an expiry,
+  and copies it. The same dialog copies an existing link or stops sharing.
+- **Recently deleted.** The sync panel lists the vault's files in Drive's trash,
+  deleted from any device, and brings one back with a tap.
 - **Mobile-friendly options**: sync on Wi-Fi only (Android), and leave large
-  files for a computer to sync.
+  files for a computer to sync. Phones and tablets skip making image
+  thumbnails, which only Proton's own apps use.
 - **Event-based updates.** Changes from other devices arrive through Drive's
   event feed rather than by re-walking the tree, and so does the catch-up when
   Obsidian opens: a scan of the vault finds what changed here while it was
   closed, and the event feed what changed on Drive. The whole Drive folder is
   only walked when that cannot tell the whole story (a first sync, a file
-  renamed or deleted while Obsidian was closed, Drive asking for it) and at
-  least once a day. Changes that fail to apply are retried, also after a
-  restart, waiting longer each time they fail again.
+  renamed or deleted while Obsidian was closed, Drive asking for it) and about
+  once a day, at a quiet moment: after five minutes without changes, or while
+  the window is hidden, never in the middle of use. Changes that fail to apply
+  are retried, also after a restart, waiting longer each time they fail again.
+- **Fewer requests at start-up.** What the Drive SDK knows about your files
+  (names, sizes, revisions) is kept between sessions, encrypted, so the
+  catch-up does not ask Drive for it all again. See
+  [Where your credentials live](#where-your-credentials-live).
 
 ## Before you rely on this
 
@@ -72,14 +84,16 @@ A few things are worth knowing before you point this at a vault you care about.
 
 **"Almost instant" is one-way.** Local edits upload within about two seconds of
 you stopping typing. Changes made on *another* device take up to the poll
-interval to arrive — **30 seconds by default**, every 15 seconds for a few
-minutes after anything changes, and less often (up to every 5 minutes) when
-nothing has happened for a while or the window is hidden. The Proton Drive API has no push
-or websocket channel, so there is no way to do better than polling, and Proton's
+interval to arrive. The pace follows Proton's own SDK: every 30 seconds for a
+few minutes after anything changes, the **Check Drive every** setting otherwise
+(30 seconds by default), and every 10 minutes after ten quiet minutes or while
+the window is hidden. The Proton Drive API has no push or websocket channel, so
+there is no way to do better than polling, and Proton's
 [usage guidelines](https://github.com/ProtonDriveApps/sdk#operational-requirements)
 ask third-party clients not to poll aggressively: an account that does can be
-rate-limited. You can lower the interval in settings, down to a floor of 15
-seconds, at your own risk. This is a limit of the service, not of this plugin.
+rate-limited. The setting cannot go below 30 seconds, Proton's own rate. The
+sync panel's details show how many requests went to Proton in the last hour.
+This is a limit of the service, not of this plugin.
 
 **The SDK is not released for third-party use yet.** Proton's README allows
 personal, non-commercial projects like this one and asks that they go through the
@@ -246,7 +260,25 @@ Proton Drive: up to the last 50, newest first, ten to a page, each with its date
 and size. Choose one to compare it with the note as it is now, in the same red
 and green diff as conflicts, and **Restore this version** to bring it back. A
 restore is written into the note and synced as a new version, so the version it
-replaces stays in the history and the restore can itself be undone. Open the
+replaces stays in the history and the restore can itself be undone. The link
+button beside the versions shares the note (see below).
+
+**Recently deleted**, at the bottom, lists the vault's files in Drive's trash
+when you ask for it: up to 50, most recently deleted first, from any device.
+**Restore** takes one out of the trash and the next check brings it back into
+the vault. A file whose folder was deleted too comes back with that folder; a
+folder deleted as a whole, from Proton's apps say, is listed for itself.
+Listing the trash covers the whole account, so it is not done each time the
+panel opens. Files deleted from Drive's trash, or after it was emptied, are
+gone.
+
+**Sharing a note.** **Copy Proton Drive share link** opens a dialog for the
+note in view. If it has no link yet, choose an optional password and an expiry
+(never, 1, 7 or 30 days) and **Create and copy link**. Anyone with the link can
+open the note, read-only, as it is on Drive at the time; the key is in the
+part of the link after `#`, which browsers do not send to Proton. If the note
+has a link already, the dialog shows it with **Copy link** and **Stop
+sharing**. A note has to be synced before it can be shared. Open the
 panel with **Open sync panel** from the command palette. The full sync log is in
 the settings, under **Recent activity**.
 
@@ -365,6 +397,7 @@ tests rather than anecdotes.
 | `src/sync/reconcile.ts` | The decision table. Pure. |
 | `src/sync/merge.ts` | Line-level three-way merge. Pure. |
 | `src/sync/engine.ts` | Watches both sides and applies decisions. |
+| `src/sync/engine/` | The engine's parts: polling pace, transfer pace, progress, case clashes, rename detection, first-sync plan. |
 | `src/sync/state.ts` | What the last sync agreed on, per path. |
 | `src/proton/` | SDK wiring: transport, session, credentials. |
 | `src/proton/account/` | Vendored from Proton's SDK repo — see its `VENDORED.md`. |
@@ -387,6 +420,16 @@ is never written inside the vault, so it is never synced, and a copied vault
 does not carry your sign-in with it. Each device signs in on its own. Sessions
 saved by version 0.1.0 in `session.json` are moved into secret storage on the
 first launch, and the file is deleted.
+
+The Drive SDK's file metadata cache (decrypted names, sizes and revisions of
+the files it has seen) is kept between sessions in an IndexedDB database of
+Obsidian's, outside the vault, so it is never synced. Each entry is encrypted
+with AES-256-GCM under a key kept inside the stored session, so it is protected
+by the PIN when there is one and useless after signing out, which also deletes
+it. It is saved together with the sync state's position in Drive's event feed,
+and thrown away when the two do not match (a crash between saves, a rebuilt
+sync state, another folder), since a stale cache could hide a change. The SDK's
+other cache, which holds decrypted keys, is only ever kept in memory.
 
 The sync state in `sync-state.json` holds paths, node ids and content hashes. No
 file contents, and no key material. It is saved so that a crash or a killed app
@@ -466,8 +509,12 @@ and why it is there.
 - **No telemetry.** The Drive SDK's metrics are dropped, not sent (see
   `src/proton/telemetry.ts`).
 - **Clipboard.** Write only, and only when you ask: "Copy link" in the sign-in
-  dialog copies the Proton sign-in link, and "Copy sync log" copies the recent
-  log. The plugin never reads the clipboard.
+  dialog copies the Proton sign-in link, "Copy sync log" copies the recent
+  log, and the share dialog copies a note's share link when you make it or
+  press "Copy link". The plugin never reads the clipboard.
+- **IndexedDB.** The Drive SDK's metadata cache is kept, encrypted, in an
+  IndexedDB database of its own; see
+  [Where your credentials live](#where-your-credentials-live).
 - **Dynamic code (`Function` / `new Function`).** Not in the plugin's own code.
   It comes from two bundled libraries: `ttag`, the translation library inside
   Proton's Drive SDK, which compiles plural-form rules, and `core-js`, whose

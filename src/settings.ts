@@ -140,5 +140,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     pinLockAfterMinutes: 0,
 };
 
-/** Lower bound on the poll interval, to keep the account out of rate limiting. */
-export const MIN_POLL_SECONDS = 15;
+/**
+ * Lower bound on the poll interval: the rate Proton's own SDK polls a user's
+ * Drive at. Faster would only invite rate limiting.
+ */
+export const MIN_POLL_SECONDS = 30;

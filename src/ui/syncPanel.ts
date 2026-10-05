@@ -1,6 +1,6 @@
 import { ButtonComponent, ExtraButtonComponent, ItemView, setIcon, type WorkspaceLeaf } from 'obsidian';
 
-import type { NoteVersion, PendingChange, SyncSummary } from '../sync/engine';
+import type { DeletedItem, NoteVersion, PendingChange, SyncSummary } from '../sync/engine';
 import { basename } from '../sync/paths';
 import {
     formatBytes,
@@ -34,6 +34,12 @@ export type SyncPanelHost = {
     noteVersions(path: string): Promise<NoteVersion[] | null>;
     /** Compare the note with a version, and offer to restore it. */
     openVersion(path: string, version: NoteVersion): void;
+    /** Show the note's public link on Drive, or offer to make one. */
+    shareNote(path: string): void;
+    /** Files of the vault in Drive's trash, most recent first. */
+    recentlyDeleted(): Promise<DeletedItem[]>;
+    /** Take one out of the trash; the next check brings it back. */
+    restoreDeleted(item: DeletedItem): Promise<void>;
     /** Open a note, from the "Not synced yet" list. */
     openFile(path: string): void;
     syncNow(): void;
@@ -67,6 +73,10 @@ export class SyncPanelView extends ItemView {
     private pendingEl!: HTMLElement;
     private historyTitleEl!: HTMLElement;
     private historyEl!: HTMLElement;
+    private shareButton!: ExtraButtonComponent;
+    private deletedEl!: HTMLElement;
+    /** The "Recently deleted" list: not asked for, being listed, listed, or failed. */
+    private deleted: DeletedItem[] | null | 'loading' | Error = null;
 
     /** What the history list shows: for which listing, and its state. */
     private historyKey: string | null = null;
@@ -123,6 +133,14 @@ export class SyncPanelView extends ItemView {
 
         const historyHeading = root.createDiv({ cls: 'proton-drive-sync-panel-heading proton-drive-sync-panel-history-heading' });
         this.historyTitleEl = historyHeading.createEl('h6');
+        this.shareButton = new ExtraButtonComponent(historyHeading)
+            .setIcon('link')
+            .setTooltip('Share link…')
+            .onClick(() => {
+                if (this.historyPath !== null) {
+                    this.host.shareNote(this.historyPath);
+                }
+            });
         new ExtraButtonComponent(historyHeading)
             .setIcon('refresh-cw')
             .setTooltip('List the versions again')
@@ -131,6 +149,15 @@ export class SyncPanelView extends ItemView {
                 this.noteChanged();
             });
         this.historyEl = root.createDiv({ cls: 'proton-drive-sync-panel-history' });
+
+        const deletedHeading = root.createDiv({ cls: 'proton-drive-sync-panel-heading proton-drive-sync-panel-history-heading' });
+        deletedHeading.createEl('h6', { text: 'Recently deleted' });
+        new ExtraButtonComponent(deletedHeading)
+            .setIcon('refresh-cw')
+            .setTooltip('List Drive’s trash again')
+            .onClick(() => void this.loadDeleted());
+        this.deletedEl = root.createDiv({ cls: 'proton-drive-sync-panel-history' });
+        this.renderDeleted();
 
         this.update(this.host.summary());
     }
@@ -223,6 +250,7 @@ export class SyncPanelView extends ItemView {
     private renderHistory(): void {
         const path = this.historyPath;
         this.historyTitleEl.setText(path ? `Versions of ${basename(path)}` : 'Versions');
+        this.shareButton.extraSettingsEl.toggle(path !== null && this.host.canListVersions());
         this.historyEl.empty();
         const say = (text: string) => this.historyEl.createDiv({ cls: 'proton-drive-sync-muted', text });
 
@@ -287,6 +315,84 @@ export class SyncPanelView extends ItemView {
                     this.historyPage = page + 1;
                     this.renderHistory();
                 });
+        }
+    }
+
+    /**
+     * List the vault's files in Drive's trash. Asked for, not loaded with the
+     * panel: the trash covers the whole account and takes a few requests to
+     * list, which is not worth spending each time the sidebar opens.
+     */
+    private async loadDeleted(): Promise<void> {
+        if (!this.host.canListVersions() || this.deleted === 'loading') {
+            this.renderDeleted();
+            return;
+        }
+        this.deleted = 'loading';
+        this.renderDeleted();
+        try {
+            this.deleted = await this.host.recentlyDeleted();
+        } catch (error) {
+            this.deleted = error instanceof Error ? error : new Error(String(error));
+        }
+        this.renderDeleted();
+    }
+
+    /**
+     * Notes deleted from the vault, on any device, are kept in Drive's trash
+     * until it is emptied. Each can be brought back with one tap: it is
+     * restored on Drive, and the next check downloads it into the vault.
+     */
+    private renderDeleted(): void {
+        this.deletedEl.empty();
+        const say = (text: string) => this.deletedEl.createDiv({ cls: 'proton-drive-sync-muted', text });
+        if (!this.host.canListVersions()) {
+            say('Sign in, choose a Drive folder and unlock to see deleted notes.');
+            return;
+        }
+        if (this.deleted === null) {
+            new ButtonComponent(this.deletedEl).setButtonText('Show deleted notes').onClick(() => void this.loadDeleted());
+            return;
+        }
+        if (this.deleted === 'loading') {
+            say('Listing Drive’s trash…');
+            return;
+        }
+        if (this.deleted instanceof Error) {
+            say(`Could not list the trash: ${this.deleted.message}`);
+            return;
+        }
+        if (this.deleted.length === 0) {
+            say('Nothing from this vault is in Drive’s trash.');
+            return;
+        }
+        const list = this.deletedEl.createDiv({ cls: 'proton-drive-sync-panel-versions' });
+        for (const item of this.deleted) {
+            const row = list.createDiv({ cls: 'proton-drive-sync-panel-deleted' });
+            const text = row.createDiv({ cls: 'proton-drive-sync-panel-deleted-text' });
+            text.createDiv({ text: item.isFolder ? `${item.path}/ (folder)` : item.path });
+            const details = [`deleted ${timeAgo(item.deleted)}`];
+            if (item.size !== undefined) {
+                details.push(formatBytes(item.size));
+            }
+            if (item.withFolder) {
+                details.push(`comes back with ${item.withFolder}`);
+            }
+            text.createDiv({ cls: 'proton-drive-sync-muted', text: details.join(' · ') });
+            const button = new ButtonComponent(row).setButtonText('Restore').onClick(async () => {
+                button.setDisabled(true).setButtonText('Restoring…');
+                try {
+                    await this.host.restoreDeleted(item);
+                    const restored = new Set(item.restoreUids);
+                    if (Array.isArray(this.deleted)) {
+                        this.deleted = this.deleted.filter((other) => !restored.has(other.uid));
+                    }
+                    this.renderDeleted();
+                } catch (error) {
+                    button.setDisabled(false).setButtonText('Restore');
+                    say(`Could not restore ${item.path}: ${error instanceof Error ? error.message : String(error)}`);
+                }
+            });
         }
     }
 

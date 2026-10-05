@@ -34,6 +34,7 @@ import { PinFormModal, UnlockModal } from './ui/pinModals';
 import { ReloadModal } from './ui/reloadModal';
 import { CONFLICT_POLICIES, ProtonDriveSyncSettingsTab } from './ui/settingsTab';
 import { SetupModal } from './ui/setupModal';
+import { ShareModal } from './ui/shareModal';
 import { StatusBar } from './ui/statusBar';
 import { SYNC_PANEL_VIEW, SyncPanelView } from './ui/syncPanel';
 import { type NoteIndicator, noteIndicator, statusIcon, statusLabel } from './ui/syncStatus';
@@ -128,6 +129,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                     versionsKey: (path) => this.engine.versionsKey(path),
                     noteVersions: (path) => this.engine.noteVersions(path),
                     openVersion: (path, version) => compareWithVersion(this, path, version),
+                    shareNote: (path) => this.shareNote(path),
+                    recentlyDeleted: () => this.engine.recentlyDeleted(),
+                    restoreDeleted: async (item) => {
+                        await this.engine.restoreDeleted(item);
+                        new Notice(`Restored "${item.path}"; it is back in the vault after the next check.`);
+                    },
                     openFile: (path) => void this.app.workspace.openLinkText(path, '', false),
                     syncNow: () => void this.syncNowOrSetUp(),
                     togglePause: () => void this.setPaused(!this.settings.paused),
@@ -159,11 +166,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             },
             protonLogger,
         );
-        this.session = new ProtonSession(credentials, clientUid, protonLogger);
+        this.session = new ProtonSession(credentials, clientUid, protonLogger, () => this.state.cursorsFingerprint());
         this.state = new SyncState(
             this.app.vault.adapter,
             this.pluginFile(STATE_FILE),
             this.logger.getLogger('state'),
+            // The Drive cache is only valid at the event position it was saved
+            // at, so it is saved whenever the state, and its cursor, are.
+            () => void this.session.flushCache(),
         );
         this.conflictHistory = new ConflictHistory(
             this.app.vault.adapter,
@@ -243,6 +253,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             // sides.
             await this.engine.stop();
             await this.state.reset();
+            await this.session.clearCache();
         }
         if (options.connect ?? true) {
             await this.reconnect();
@@ -257,6 +268,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     async rebuildState(): Promise<void> {
         await this.engine.stop();
         await this.state.reset();
+        await this.session.clearCache();
         await this.connect();
     }
 
@@ -525,6 +537,13 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         }
 
         await this.state.load(this.session.accountEmail ?? null, this.settings.remoteFolderUid);
+        if (this.state.wasLost() || this.state.paths().length === 0) {
+            // A sync starting from nothing must not trust anything cached
+            // about how Drive used to look.
+            await this.session.clearCache();
+        } else {
+            await this.session.validateCache(this.state.cursorsFingerprint());
+        }
         if (
             !this.settings.paused &&
             this.state.paths().length === 0 &&
@@ -734,6 +753,22 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         });
 
         this.addCommand({
+            id: 'copy-share-link',
+            icon: 'link',
+            name: 'Copy Proton Drive share link',
+            checkCallback: (checking) => {
+                const file = this.app.workspace.getActiveFile();
+                if (!file || !this.isConfigured() || this.locked) {
+                    return false;
+                }
+                if (!checking) {
+                    this.shareNote(file.path);
+                }
+                return true;
+            },
+        });
+
+        this.addCommand({
             id: 'unlock',
             icon: 'lock-open',
             name: 'Unlock with PIN',
@@ -761,6 +796,15 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             name: 'Copy sync log',
             callback: () => void this.copyLog(),
         });
+    }
+
+    /** The note's public link on Drive, with Copy and Stop sharing, or a form to make one. */
+    shareNote(path: string): void {
+        new ShareModal(this.app, path, {
+            load: () => this.engine.noteShareLink(path),
+            create: (options) => this.engine.createNoteShareLink(path, options),
+            remove: () => this.engine.removeNoteShareLink(path),
+        }).open();
     }
 
     private registerVaultEvents(): void {

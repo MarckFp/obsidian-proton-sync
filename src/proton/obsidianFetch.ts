@@ -1,3 +1,4 @@
+import { updateServerTimeWithUpdateTimestamp } from '@protontech/crypto/serverTime';
 import { requestUrl, type RequestUrlParam } from 'obsidian';
 
 import { requestStats } from '../util/requestStats';
@@ -41,8 +42,10 @@ export async function obsidianFetch(input: RequestInfo | URL, init?: RequestInit
         params.body = await request.arrayBuffer();
     }
 
+    const requestedAt = new Date();
     const response = await requestUrl(params);
     requestStats.record(response.status);
+    followServerTime(response.headers, requestedAt);
 
     // `requestUrl` lowercases header names and omits the status text. Neither
     // matters to the callers here, which read status codes and JSON bodies.
@@ -50,6 +53,26 @@ export async function obsidianFetch(input: RequestInfo | URL, init?: RequestInit
         status: response.status,
         headers: new Headers(response.headers ?? {}),
     });
+}
+
+/**
+ * Keep the crypto library's clock in step with Proton's.
+ *
+ * Every signature is dated, and every signature from another device is checked
+ * against the current time, using `serverTime()` from `@protontech/crypto`.
+ * Until it is given the server's time it falls back to this device's clock, so
+ * a device whose clock is off dates its uploads wrongly and can refuse another
+ * device's freshly signed file as signed "in the future". Proton's own clients
+ * feed it every response's `Date` header, and so does this. The time recorded
+ * with it is when the request was sent, not answered, as the library asks, so
+ * the server time is never taken for fresher than it is.
+ */
+function followServerTime(headers: Record<string, string> | undefined, requestedAt: Date): void {
+    const date = headers?.['date'] ?? headers?.['Date'];
+    const time = date === undefined ? NaN : Date.parse(date);
+    if (!Number.isNaN(time)) {
+        updateServerTimeWithUpdateTimestamp(new Date(time), requestedAt);
+    }
 }
 
 /**
