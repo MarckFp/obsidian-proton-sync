@@ -40,6 +40,11 @@ export type SyncPanelHost = {
     recentlyDeleted(): Promise<DeletedItem[]>;
     /** Take one out of the trash; the next check brings it back. */
     restoreDeleted(item: DeletedItem): Promise<void>;
+    /**
+     * Owner of the synced folder when it is in someone else's Drive. Files
+     * deleted there go to the owner's trash, which this account cannot list.
+     */
+    sharedBy(): string | null;
     /** Open a note, from the "Not synced yet" list. */
     openFile(path: string): void;
     syncNow(): void;
@@ -348,6 +353,11 @@ export class SyncPanelView extends ItemView {
         const say = (text: string) => this.deletedEl.createDiv({ cls: 'proton-drive-sync-muted', text });
         if (!this.host.canListVersions()) {
             say('Sign in, choose a Drive folder and unlock to see deleted notes.');
+            return;
+        }
+        const owner = this.host.sharedBy();
+        if (owner !== null) {
+            say(`This vault is shared with you by ${owner}. Deleted notes go to their Proton Drive trash; ask them to restore one.`);
             return;
         }
         if (this.deleted === null) {

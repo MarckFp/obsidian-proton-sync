@@ -61,6 +61,9 @@ same implementation Proton's own clients use.
   and copies it. The same dialog copies an existing link or stops sharing.
 - **Recently deleted.** The sync panel lists the vault's files in Drive's trash,
   deleted from any device, and brings one back with a tap.
+- **Shared vaults.** Pick a folder from **Shared with me** to use a vault
+  together: share the folder in Proton Drive with editor access, and everyone it
+  is shared with can sync it into a vault of their own.
 - **Mobile-friendly options**: sync on Wi-Fi only (Android), and leave large
   files for a computer to sync. Phones and tablets skip making image
   thumbnails, which only Proton's own apps use.
@@ -331,6 +334,32 @@ turn off **Sync Obsidian settings**.
 Add your own exclusions as globs — `Private/`, `**/*.pdf` — in settings. A
 pattern that would not do what it looks like, such as one with a leading `/` or
 Windows `\` separators, is flagged under the field as you type.
+
+## Sharing a vault with other people
+
+A vault can live in a Drive folder shared between Proton accounts. The owner
+shares the folder in Proton Drive with **editor** access; each person accepts
+the invitation there, then picks the folder under **Shared with me** in the
+folder picker. Who can use the vault is whatever Proton Drive's sharing says.
+
+- A folder shared for viewing only cannot be picked: a two-way sync would fail
+  on every upload.
+- Choosing a shared folder turns off syncing of the config folder, so people do
+  not overwrite each other's theme, plugins and hotkeys. It can be turned back
+  on in the settings.
+- Installed plugins (`.obsidian/plugins/`) and the list of enabled ones
+  (`community-plugins.json`) are never synced with a folder other people can
+  write to, even with config sync on: anyone with editor access could otherwise
+  put a plugin into the vault that runs on everyone's computer. This applies as
+  soon as the folder, or a folder above it, is shared with another account,
+  also when it was shared after you chose it. A public link does not count.
+- Plugins that run code from notes, such as Dataview's JavaScript queries or
+  Templater's scripts, run what your collaborators write. Turn those features
+  off in a shared vault unless you trust everyone it is shared with.
+- Notes deleted from a shared vault go to the owner's Drive trash, which only
+  the owner can list and restore from.
+- If the owner stops sharing, syncing stops with an error; the notes in the
+  vault stay where they are.
 
 ## Using several devices at once
 

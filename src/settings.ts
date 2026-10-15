@@ -6,6 +6,12 @@ export type PluginSettings = {
     remoteFolderUid: string | null;
     /** Human-readable path of that folder, for display only. */
     remoteFolderPath: string | null;
+    /**
+     * Owner of that folder when it is shared with this account rather than in
+     * its own My files, for display: their address, or "someone" when Drive
+     * does not name them. Null for a folder of the user's own.
+     */
+    remoteFolderSharedBy: string | null;
 
     conflictPolicy: ConflictPolicy;
     /** Keeps the losing side as a sibling file under `prefer-*` policies too. */
@@ -112,9 +118,20 @@ export function configExclusions(configDir: string, pluginDir: string | null): s
     return patterns;
 }
 
+/**
+ * Config files that make Obsidian run code: the installed plugins and the list
+ * of enabled ones. Never synced with a vault other people can write to, even
+ * with config sync on, since a collaborator could otherwise put a plugin on
+ * everyone's machine that runs on the next reload.
+ */
+export function codeExclusions(configDir: string): string[] {
+    return [`${configDir}/plugins/**`, `${configDir}/plugins`, `${configDir}/community-plugins.json`];
+}
+
 export const DEFAULT_SETTINGS: PluginSettings = {
     remoteFolderUid: null,
     remoteFolderPath: null,
+    remoteFolderSharedBy: null,
 
     conflictPolicy: 'keep-both',
     keepConflictCopies: true,

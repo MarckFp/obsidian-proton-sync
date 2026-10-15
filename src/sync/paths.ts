@@ -1,4 +1,4 @@
-import { ALWAYS_EXCLUDED, configExclusions } from '../settings';
+import { ALWAYS_EXCLUDED, codeExclusions, configExclusions } from '../settings';
 
 /**
  * Path handling for the vault side of the sync.
@@ -68,6 +68,8 @@ export class PathFilter {
         syncObsidianConfig: boolean,
         private readonly configDir: string,
         pluginDir: string | null = null,
+        /** The vault is shared with others: never sync config that runs code; see {@link codeExclusions}. */
+        sharedWithOthers = false,
     ) {
         const patterns = [
             ...ALWAYS_EXCLUDED,
@@ -76,6 +78,9 @@ export class PathFilter {
         ];
         if (!syncObsidianConfig) {
             patterns.push(`${configDir}/**`, configDir);
+        }
+        if (sharedWithOthers) {
+            patterns.push(...codeExclusions(configDir));
         }
         this.matchers = patterns.map(globToRegExp);
     }
