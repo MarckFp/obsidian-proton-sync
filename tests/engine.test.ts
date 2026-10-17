@@ -352,6 +352,19 @@ describe('SyncEngine — two devices saving at once', () => {
         assert.deepEqual(vault.notePaths(), ['note.md']);
     });
 
+    it('replaces an unfinished upload another device left under the same name', async () => {
+        const { vault, drive, engine, conflicts, settled } = await setup();
+
+        drive.leaveDraft('Idea.md');
+        vault.write('Idea.md', 'from the laptop');
+        engine.onVaultChange('Idea.md');
+        await settled();
+
+        assert.equal(drive.text('Idea.md'), 'from the laptop');
+        assert.equal(drive.drafts.size, 0);
+        assert.deepEqual(conflicts, []);
+    });
+
     it('treats a name taken on Drive mid-upload as a conflict, keeping both', async () => {
         const { vault, drive, engine, conflicts, settled } = await setup();
 
