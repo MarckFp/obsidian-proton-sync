@@ -275,6 +275,8 @@ export class FakeDrive {
     autoEvents = false;
     /** Folder listings so far: what a full walk of the tree costs. */
     listings = 0;
+    /** Unfinished uploads by another client, as `parentUid/name`; see {@link leaveDraft}. */
+    readonly drafts = new Set<string>();
     /** Names of uploaded files, in the order their uploads completed. */
     readonly uploadLog: string[] = [];
     private readonly events: {
@@ -370,6 +372,15 @@ export class FakeDrive {
         return found;
     }
 
+    /**
+     * Simulate another installation starting an upload and never finishing
+     * it: Drive keeps a draft that holds the name but lists as nothing.
+     */
+    leaveDraft(path: string): void {
+        const parentUid = this.ensureFolderPath(parentOf(path));
+        this.drafts.add(`${parentUid}/${path.slice(path.lastIndexOf('/') + 1)}`);
+    }
+
     /** Simulate another device writing a file. */
     put(path: string, text: string): FakeNode {
         const parentUid = this.ensureFolderPath(parentOf(path));
@@ -440,6 +451,13 @@ export class FakeDrive {
                 return drive.entity(node);
             },
             async getFileUploader(parentUid: string, name: string, metadata: UploadMetadata) {
+                const draft = `${parentUid}/${name}`;
+                if (drive.drafts.has(draft)) {
+                    if (!metadata.overrideExistingDraftByOtherClient) {
+                        throw new NodeWithSameNameExistsValidationError(`A draft named "${name}" exists`, 2500, 'draft', true);
+                    }
+                    drive.drafts.delete(draft);
+                }
                 drive.assertFree(parentUid, name);
                 return drive.uploader(metadata, () => {
                     // Checked again at commit time, as Drive does: the name
@@ -694,4 +712,9 @@ export class FakeDrive {
     }
 }
 
-type UploadMetadata = { expectedSha1: string; expectedSize: number; modificationTime: Date };
+type UploadMetadata = {
+    expectedSha1: string;
+    expectedSize: number;
+    modificationTime: Date;
+    overrideExistingDraftByOtherClient?: boolean;
+};

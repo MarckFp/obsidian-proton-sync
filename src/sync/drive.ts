@@ -317,9 +317,12 @@ export class DriveIO {
         source: UploadSource,
         signal?: AbortSignal,
         onProgress?: (bytes: number) => void,
+        /** Delete an unfinished upload of the same name that another installation left behind. */
+        overrideDraft = false,
     ): Promise<{ nodeUid: string; revisionUid: string }> {
+        const metadata = { ...uploadMetadata(source), ...(overrideDraft && { overrideExistingDraftByOtherClient: true }) };
         return this.withThumbnailFallback(source, async (stream, thumbnails) => {
-            const uploader = await this.client.getFileUploader(parentUid, name, uploadMetadata(source), signal);
+            const uploader = await this.client.getFileUploader(parentUid, name, metadata, signal);
             const controller = await uploader.uploadFromStream(stream, thumbnails, onProgress);
             const { nodeUid, nodeRevisionUid } = await controller.completion();
             return { nodeUid, revisionUid: nodeRevisionUid };

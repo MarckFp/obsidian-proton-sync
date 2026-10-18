@@ -1159,7 +1159,7 @@ export class SyncEngine {
         const parentUid = await this.ensureRemoteFolder(parentPath(path));
         let result: { nodeUid: string; revisionUid: string };
         try {
-            result = await drive.uploadNewFile(parentUid, basename(path), source, signal, onProgress);
+            result = await this.uploadOverStaleDraft(path, parentUid, source, signal, onProgress);
         } catch (error) {
             // Another device created a file under the same name since this
             // pass looked. That is the both-created conflict, found late.
@@ -1219,6 +1219,38 @@ export class SyncEngine {
         await this.fetchInto(copyPath, lost.uid, lost.claimedSize, lost.claimedModificationTime?.getTime(), undefined);
         await this.uploadAsNewFile(copyPath);
         this.reportConflict({ path, reason: 'both-modified', outcome: 'kept-both', copyPath });
+    }
+
+    /**
+     * Upload a new file, replacing an unfinished upload of the same name that
+     * another installation left on Drive.
+     *
+     * Such a draft is invisible in Drive's apps and holds no content anyone
+     * can read, but it holds the name: the SDK clears drafts this client made
+     * and refuses ones made by any other, so a device that quit mid-upload,
+     * or this one before its installation id changed, would otherwise block
+     * the file for good, failing on every pass. Overriding it is safe even if
+     * the other device is still uploading: its upload then fails, and its
+     * next pass finds this file and treats it as a both-created conflict, so
+     * both versions are kept.
+     */
+    private async uploadOverStaleDraft(
+        path: string,
+        parentUid: string,
+        source: UploadSource,
+        signal: AbortSignal | undefined,
+        onProgress: ((bytes: number) => void) | undefined,
+    ): Promise<{ nodeUid: string; revisionUid: string }> {
+        const drive = this.drive!;
+        try {
+            return await drive.uploadNewFile(parentUid, basename(path), source, signal, onProgress);
+        } catch (error) {
+            if (!(error instanceof NodeWithSameNameExistsValidationError && error.isUnfinishedUpload)) {
+                throw error;
+            }
+            this.logger.warn(`An unfinished upload from another device was holding "${path}" on Drive; replacing it`);
+            return drive.uploadNewFile(parentUid, basename(path), source, signal, onProgress, true);
+        }
     }
 
     /** Upload a file that has no node on Drive yet, such as a fresh conflict copy. */
