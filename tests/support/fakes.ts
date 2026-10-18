@@ -234,6 +234,8 @@ type FakeNode = {
     trashedAt?: number;
     /** Its public link, if shared. */
     link?: { url: string; customPassword?: string; expirationTime?: Date };
+    /** Other accounts it is shared with. */
+    members?: string[];
     /** The active revision; `history` holds every revision, oldest first. */
     revision?: FakeRevision;
     history: FakeRevision[];
@@ -244,6 +246,11 @@ export const SYNC_ROOT = 'sync-root';
 
 export class FakeDrive {
     readonly nodes = new Map<string, FakeNode>();
+    /**
+     * Event scope of the account's own My files. Set to anything other than
+     * `'scope'` to make every node read as being in someone else's Drive.
+     */
+    myFilesScope = 'scope';
     /** Makes node lookups fail, as a dropped connection mid-sync would. Listing child uids still works; resolving them is a lookup. */
     failLookups = false;
     /**
@@ -386,7 +393,7 @@ export class FakeDrive {
         const drive = this;
         return {
             async getMyFilesRootFolder() {
-                return drive.entity(drive.nodes.get(VOLUME_ROOT)!);
+                return { ...drive.entity(drive.nodes.get(VOLUME_ROOT)!), treeEventScopeId: drive.myFilesScope };
             },
             async getNode(uid: string) {
                 const node = drive.nodes.get(uid);
@@ -497,8 +504,16 @@ export class FakeDrive {
                 }
             },
             async getSharingInfo(uid: string) {
-                const link = drive.nodes.get(uid)!.link;
-                return link ? { protonInvitations: [], nonProtonInvitations: [], members: [], urlAccess: drive.urlAccess(link) } : undefined;
+                const { link, members } = drive.nodes.get(uid)!;
+                if (!link && !members?.length) {
+                    return undefined;
+                }
+                return {
+                    protonInvitations: [],
+                    nonProtonInvitations: [],
+                    members: (members ?? []).map((email) => ({ inviteeEmail: email })),
+                    ...(link && { urlAccess: drive.urlAccess(link) }),
+                };
             },
             async shareNode(uid: string, settings: { urlAccess: { customPassword?: string; expiration?: Date } }) {
                 const node = drive.nodes.get(uid)!;
@@ -632,6 +647,7 @@ export class FakeDrive {
             type: node.type,
             trashTime: node.trashed ? new Date(node.trashedAt ?? Date.now()) : undefined,
             treeEventScopeId: 'scope',
+            isShared: Boolean(node.link || node.members?.length),
             activeRevision: node.revision && {
                 uid: node.revision.uid,
                 claimedDigests: { sha1: node.revision.sha1 },

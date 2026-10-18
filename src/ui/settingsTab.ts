@@ -234,7 +234,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
     // -- folder ------------------------------------------------------------
 
     private folderGroup(): SettingDefinitionItem {
-        const { remoteFolderPath, remoteFolderUid } = this.plugin.settings;
+        const { remoteFolderPath, remoteFolderUid, remoteFolderSharedBy } = this.plugin.settings;
 
         return {
             type: 'group',
@@ -243,7 +243,8 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                 {
                     name: 'Folder for this vault',
                     desc: remoteFolderUid
-                        ? `Syncing with "${remoteFolderPath ?? 'a folder in your Drive'}". ` +
+                        ? `Syncing with "${remoteFolderPath ?? 'a folder in your Drive'}"` +
+                          (remoteFolderSharedBy ? `, shared with you by ${remoteFolderSharedBy}. ` : '. ') +
                           'The vault root maps onto this folder.'
                         : 'Choose the folder in your Drive that this vault maps onto. ' +
                           'Use a folder of its own — everything in it is treated as part of the vault.',

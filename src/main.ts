@@ -23,6 +23,7 @@ import { ConflictHistory } from './sync/conflictHistory';
 import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
 import { ProtonSession } from './proton/session';
 import { DEFAULT_SETTINGS, type PluginSettings } from './settings';
+import type { ChosenFolder } from './ui/folderPickerModal';
 import { SyncEngine, type ConflictEvent, type OpenEditor, type SyncPlan, type SyncSummary } from './sync/engine';
 import { SyncState } from './sync/state';
 import { formatLogEntries, Logger } from './util/logger';
@@ -135,6 +136,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                         await this.engine.restoreDeleted(item);
                         new Notice(`Restored "${item.path}"; it is back in the vault after the next check.`);
                     },
+                    sharedBy: () => this.settings.remoteFolderSharedBy,
                     openFile: (path) => void this.app.workspace.openLinkText(path, '', false),
                     syncNow: () => void this.syncNowOrSetUp(),
                     togglePause: () => void this.setPaused(!this.settings.paused),
@@ -241,10 +243,18 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     /** Point the vault at a Drive folder and, unless told not to, start syncing with it. */
-    async setRemoteFolder(folder: { uid: string; path: string }, options: { connect?: boolean } = {}): Promise<void> {
+    async setRemoteFolder(folder: ChosenFolder, options: { connect?: boolean } = {}): Promise<void> {
         const changed = folder.uid !== this.settings.remoteFolderUid;
         this.settings.remoteFolderUid = folder.uid;
         this.settings.remoteFolderPath = folder.path;
+        this.settings.remoteFolderSharedBy = folder.sharedBy;
+        if (changed && folder.shared && this.settings.syncObsidianConfig) {
+            // A shared vault is used by several people: syncing the config
+            // folder would hand each of them everyone else's theme, plugins
+            // and hotkeys. Off by default; the setting can turn it back on.
+            this.settings.syncObsidianConfig = false;
+            this.notify('settings and plugins are not synced with a shared folder; turn this back on in the settings if you want them.');
+        }
         await this.saveSettings();
 
         if (changed) {
@@ -468,6 +478,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         await this.rememberedUnlock.clear();
         this.settings.remoteFolderUid = null;
         this.settings.remoteFolderPath = null;
+        this.settings.remoteFolderSharedBy = null;
         await this.saveSettings();
         await this.state.reset();
         this.refreshSettingsTab();

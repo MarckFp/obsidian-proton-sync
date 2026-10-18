@@ -16,7 +16,7 @@ import { Limiter, runPooled } from '../util/pool';
 import { ConflictResolver, MAX_MERGE_BYTES } from './conflicts';
 import { isTextPath } from './media';
 import { mergeThreeWay } from './merge';
-import { DriveIO, type NodeLocation, type RemoteTree, type ShareLink, type UploadSource } from './drive';
+import { DriveIO, sharedWithOthers, type NodeLocation, type RemoteTree, type ShareLink, type UploadSource } from './drive';
 import {
     basename,
     conflictCopyPath,
@@ -146,6 +146,12 @@ export class SyncEngine {
 
     private drive: DriveIO | null = null;
     private filter: PathFilter;
+    /**
+     * Whether other people can write to the synced folder. Assumed until Drive
+     * says otherwise, so that config which runs code is never synced on the
+     * strength of a check that has not happened yet.
+     */
+    private folderShared = true;
     private resolver: ConflictResolver | null = null;
 
     private rootUid: string | null = null;
@@ -598,6 +604,7 @@ export class SyncEngine {
             // a change made while the tree is walked is still replayed by the
             // next poll rather than skipped over.
             const scopeId = (await drive.getNode(rootUid)).treeEventScopeId;
+            await this.refreshSharing(() => drive.sharedWithOthers(rootUid));
             if (this.state.getEventCursor(scopeId) === null) {
                 const latest = await drive.latestEventId(scopeId);
                 if (latest !== null) {
@@ -2144,6 +2151,7 @@ export class SyncEngine {
             const root = await this.drive!.getNode(this.rootUid!);
             this.treeEventScopeId = root.treeEventScopeId;
             this.folderUids.set('', this.rootUid!);
+            await this.refreshSharing(() => this.drive!.sharedWithOthers(this.rootUid!));
         } catch (error) {
             this.reportFailure('Could not read the synced folder', error);
         }
@@ -2473,7 +2481,28 @@ export class SyncEngine {
             settings.syncObsidianConfig,
             this.scope.configDir,
             this.scope.pluginDir,
+            this.folderShared,
         );
+    }
+
+    /**
+     * Ask Drive whether the folder is shared, and narrow or widen the filter
+     * to match. Runs with every full sync, so a folder shared after it was
+     * chosen is caught on the next one. A failed check keeps the folder
+     * treated as shared: that only holds back plugin files for a pass, while
+     * the opposite mistake could run a collaborator's code.
+     */
+    private async refreshSharing(check: () => Promise<boolean>): Promise<void> {
+        let shared = true;
+        try {
+            shared = await check();
+        } catch (error) {
+            this.logger.warn(`Could not check whether the synced folder is shared; treating it as shared: ${String(error)}`);
+        }
+        if (shared !== this.folderShared) {
+            this.folderShared = shared;
+            this.filter = this.createFilter(this.settings);
+        }
     }
 
     private createResolver(drive: DriveIO, policy: ConflictPolicy, keepConflictCopies?: boolean): ConflictResolver {
@@ -2610,6 +2639,9 @@ export class SyncEngine {
 
     /** What a first sync against `rootUid` would do, without doing any of it; see {@link planFirstSync}. */
     async plan(client: ProtonDriveClient, rootUid: string): Promise<SyncPlan> {
+        // The preview runs before the engine starts; it needs the same
+        // answer on sharing that the sync itself will use.
+        await this.refreshSharing(() => sharedWithOthers(client, rootUid));
         return planFirstSync(
             {
                 logger: this.logger,

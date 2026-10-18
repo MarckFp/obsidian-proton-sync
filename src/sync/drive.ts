@@ -61,7 +61,67 @@ export async function* iterateChildNodes(
     }
 }
 
-async function* resolveNodes(client: Pick<ProtonDriveClient, 'iterateNodes'>, uids: string[]): AsyncGenerator<NodeEntity> {
+const ROLE_RANK: Partial<Record<MemberRole, number>> = {
+    [MemberRole.Viewer]: 1,
+    [MemberRole.Editor]: 2,
+    [MemberRole.Admin]: 3,
+};
+
+/**
+ * This account's access to a node.
+ *
+ * Drive sets a role only where access was granted - the volume root for the
+ * owner, the shared folder for a member - and marks everything below it as
+ * inherited, so the actual role is the highest one found up the hierarchy.
+ * A hierarchy with no role on it reads as Viewer: the safe answer, since it
+ * keeps the vault from trying to write where it may not.
+ */
+export async function accessRole(client: Pick<ProtonDriveClient, 'getNodeHierarchy'>, nodeUid: string): Promise<MemberRole> {
+    let best: MemberRole = MemberRole.Viewer;
+    for (const node of await client.getNodeHierarchy(nodeUid)) {
+        if ((ROLE_RANK[node.directRole] ?? 0) > (ROLE_RANK[best] ?? 0)) {
+            best = node.directRole;
+        }
+    }
+    return best;
+}
+
+/**
+ * Whether other people can write to the folder: it is in someone else's Drive,
+ * or it or a folder above it is shared with other accounts. A public link does
+ * not count; it only lets people read.
+ */
+export async function sharedWithOthers(
+    client: Pick<ProtonDriveClient, 'getMyFilesRootFolder' | 'getNodeHierarchy' | 'getSharingInfo'>,
+    nodeUid: string,
+): Promise<boolean> {
+    const [myFiles, hierarchy] = await Promise.all([client.getMyFilesRootFolder(), client.getNodeHierarchy(nodeUid)]);
+    const node = hierarchy[hierarchy.length - 1];
+    if (node && node.treeEventScopeId !== myFiles.treeEventScopeId) {
+        return true;
+    }
+    for (const ancestor of hierarchy) {
+        if (!ancestor.isShared) {
+            continue;
+        }
+        const sharing = await client.getSharingInfo(ancestor.uid);
+        if (sharing && sharing.members.length + sharing.protonInvitations.length + sharing.nonProtonInvitations.length > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** The roles that can upload, rename and trash, which a two-way sync needs. */
+export function canWrite(role: MemberRole): boolean {
+    return role === MemberRole.Editor || role === MemberRole.Admin;
+}
+
+/**
+ * The nodes of these uids, skipping any that no longer exist. For uids that
+ * come from a listing, where a missing node is simply one gone since.
+ */
+export async function* resolveNodes(client: Pick<ProtonDriveClient, 'iterateNodes'>, uids: string[]): AsyncGenerator<NodeEntity> {
     for await (const node of client.iterateNodes(uids)) {
         if (!('missingUid' in node)) {
             yield node;
@@ -81,6 +141,11 @@ export class DriveIO {
 
     async getNode(nodeUid: string): Promise<NodeEntity> {
         return this.client.getNode(nodeUid);
+    }
+
+    /** See {@link sharedWithOthers}. */
+    async sharedWithOthers(nodeUid: string): Promise<boolean> {
+        return sharedWithOthers(this.client, nodeUid);
     }
 
     /**
