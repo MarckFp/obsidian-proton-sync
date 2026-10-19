@@ -89,7 +89,8 @@ export async function accessRole(client: Pick<ProtonDriveClient, 'getNodeHierarc
 /**
  * Whether other people can write to the folder: it is in someone else's Drive,
  * or it or a folder above it is shared with other accounts. A public link does
- * not count; it only lets people read.
+ * not count; it only lets people read. My files itself is an internal root
+ * share, not a folder that can be shared with collaborators.
  */
 export async function sharedWithOthers(
     client: Pick<ProtonDriveClient, 'getMyFilesRootFolder' | 'getNodeHierarchy' | 'getSharingInfo'>,
@@ -101,7 +102,11 @@ export async function sharedWithOthers(
         return true;
     }
     for (const ancestor of hierarchy) {
-        if (!ancestor.isShared) {
+        // The SDK flags My files as shared because it has an internal root
+        // share. Root shares cannot be shared with others. Asking for its
+        // sharing info also takes the SDK down the standard-share decryption
+        // path, which can fail for this address-key-encrypted root (#13).
+        if (ancestor.uid === myFiles.uid || !ancestor.isShared) {
             continue;
         }
         const sharing = await client.getSharingInfo(ancestor.uid);

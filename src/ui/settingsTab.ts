@@ -262,7 +262,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                                     }
                                     new FolderPickerModal(this.app, this.plugin.session.getClient(), (folder) => {
                                         void this.plugin.setRemoteFolder(folder).then(() => this.update());
-                                    }).open();
+                                    }, this.plugin.logger.getLogger('folder-picker')).open();
                                 }),
                         );
                     },

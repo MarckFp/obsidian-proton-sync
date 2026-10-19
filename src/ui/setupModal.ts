@@ -88,7 +88,7 @@ export class SetupModal extends Modal {
                         new FolderPickerModal(this.app, this.plugin.session.getClient(), (folder) => {
                             this.changed = true;
                             void this.plugin.setRemoteFolder(folder, { connect: false }).then(() => this.render());
-                        }).open();
+                        }, this.plugin.logger.getLogger('folder-picker')).open();
                     });
                 if (signedIn && !remoteFolderUid) {
                     button.setCta();
