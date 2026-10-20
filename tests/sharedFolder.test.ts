@@ -62,8 +62,39 @@ describe('sharedWithOthers', () => {
 
     it('is true when a folder above it is shared', async () => {
         const drive = new FakeDrive();
-        drive.nodes.get(VOLUME_ROOT)!.members = ['friend@proton.me'];
-        assert.equal(await sharedWithOthers(client(drive), SYNC_ROOT), true);
+        drive.put('Nested/note.md', 'hello');
+        drive.nodes.get(SYNC_ROOT)!.members = ['friend@proton.me'];
+        assert.equal(await sharedWithOthers(client(drive), drive.at('Nested')!.uid), true);
+    });
+
+    it('does not inspect the internal My files root share (#13)', async () => {
+        const drive = new FakeDrive();
+        const sdk = client(drive);
+        const getHierarchy = sdk.getNodeHierarchy.bind(sdk);
+        sdk.getNodeHierarchy = async (uid) => (await getHierarchy(uid)).map((node) => ({
+            ...node, isShared: node.uid === VOLUME_ROOT || node.isShared,
+        }));
+        sdk.getSharingInfo = async () => {
+            assert.fail('My files is an internal root share, not a collaboration share');
+        };
+        assert.equal(await sharedWithOthers(sdk, SYNC_ROOT), false);
+        assert.equal(await sharedWithOthers(sdk, VOLUME_ROOT), false);
+    });
+
+    it('still checks a shared folder below the internal root share', async () => {
+        const drive = new FakeDrive();
+        drive.nodes.get(SYNC_ROOT)!.members = ['friend@proton.me'];
+        const sdk = client(drive);
+        const getHierarchy = sdk.getNodeHierarchy.bind(sdk);
+        const getSharing = sdk.getSharingInfo.bind(sdk);
+        sdk.getNodeHierarchy = async (uid) => (await getHierarchy(uid)).map((node) => ({
+            ...node, isShared: node.uid === VOLUME_ROOT || node.isShared,
+        }));
+        sdk.getSharingInfo = async (uid) => {
+            assert.notEqual(uid, VOLUME_ROOT);
+            return getSharing(uid);
+        };
+        assert.equal(await sharedWithOthers(sdk, SYNC_ROOT), true);
     });
 
     it('is true for a folder in someone else’s Drive', async () => {
@@ -138,6 +169,53 @@ describe('SyncEngine — config that runs code, in a shared vault', () => {
         await startEngine(vault, drive, { syncObsidianConfig: true });
 
         assert.equal(vault.read('.obsidian/plugins/evil/main.js'), 'steal()');
+    });
+
+    it('syncs plugins for a private folder even when the SDK flags the internal root as shared', async () => {
+        const vault = new MemoryVault();
+        vault.write('.obsidian/plugins/local/main.js', 'local plugin');
+        const drive = driveWithPlugin();
+        const makeClient = drive.client.bind(drive);
+        drive.client = () => {
+            const sdk = makeClient();
+            const getHierarchy = sdk.getNodeHierarchy.bind(sdk);
+            sdk.getNodeHierarchy = async (uid) => (await getHierarchy(uid)).map((node) => ({
+                ...node, isShared: node.uid === VOLUME_ROOT || node.isShared,
+            }));
+            sdk.getSharingInfo = async () => {
+                throw new Error('Error decrypting session keys: No decryption key packets found');
+            };
+            return sdk;
+        };
+
+        await startEngine(vault, drive, { syncObsidianConfig: true });
+
+        assert.equal(vault.read('.obsidian/plugins/evil/main.js'), 'steal()');
+        assert.equal(drive.text('.obsidian/plugins/local/main.js'), 'local plugin');
+    });
+
+    it('syncs notes but holds plugin code back when sharing metadata cannot be decrypted', async () => {
+        const vault = new MemoryVault();
+        vault.write('Local.md', 'local note');
+        vault.write('.obsidian/plugins/local/main.js', 'local plugin');
+        const drive = driveWithPlugin();
+        drive.nodes.get(SYNC_ROOT)!.members = ['friend@proton.me'];
+        const makeClient = drive.client.bind(drive);
+        drive.client = () => ({
+            ...makeClient(),
+            getSharingInfo: async () => {
+                throw new Error('Error decrypting session keys: No decryption key packets found');
+            },
+        });
+
+        await startEngine(vault, drive, { syncObsidianConfig: true });
+
+        assert.equal(vault.read('Note.md'), 'hello');
+        assert.equal(drive.text('Local.md'), 'local note');
+        assert.equal(vault.read('.obsidian/app.json'), '{"vimMode":true}');
+        assert.equal(vault.read('.obsidian/plugins/evil/main.js'), undefined);
+        assert.equal(vault.read('.obsidian/community-plugins.json'), undefined);
+        assert.equal(drive.text('.obsidian/plugins/local/main.js'), undefined);
     });
 });
 

@@ -2,6 +2,7 @@ import { App, Modal, Notice, Setting } from 'obsidian';
 import { MemberRole, NodeType, type NodeEntity, type ProtonDriveClient } from '@protontech/drive-sdk';
 
 import { accessRole, canWrite, iterateChildNodes, resolveNodes, sharedWithOthers } from '../sync/drive';
+import type { Logger } from '../util/logger';
 
 /** The folder the user picked, and whose it is. */
 export type ChosenFolder = {
@@ -50,6 +51,7 @@ export class FolderPickerModal extends Modal {
         app: App,
         private readonly client: ProtonDriveClient,
         private readonly onChoose: (folder: ChosenFolder) => void,
+        private readonly logger: Logger,
     ) {
         super(app);
     }
@@ -262,7 +264,13 @@ export class FolderPickerModal extends Modal {
             const [node, role, shared] = await Promise.all([
                 this.client.getNode(uid),
                 accessRole(this.client, uid),
-                sharedWithOthers(this.client, uid),
+                sharedWithOthers(this.client, uid).catch((error: unknown) => {
+                    // Sharing metadata may be unreadable even when the folder
+                    // itself is usable. Match the engine's conservative fallback:
+                    // allow notes to sync, but keep plugin code out of config sync.
+                    this.logger.warn(`Could not check whether the chosen folder is shared; treating it as shared: ${message(error)}`);
+                    return true;
+                }),
             ]);
             if (!canWrite(role)) {
                 new Notice('This folder is shared with you for viewing only. Syncing a vault needs editor access; ask its owner.');
@@ -277,6 +285,7 @@ export class FolderPickerModal extends Modal {
             });
             this.close();
         } catch (error) {
+            this.logger.warn(`Could not check the chosen folder's node or access: ${message(error)}`);
             new Notice(`Could not check that folder: ${message(error)}`);
         }
     }
