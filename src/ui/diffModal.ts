@@ -14,18 +14,19 @@ export type DiffAction = {
     run: () => Promise<void>;
 };
 
-export type DiffModalOptions = {
-    title: string;
+export type DiffOptions = {
     /** The version whose lines are shown with `-`. */
     oldLabel: string;
     /** The version whose lines are shown with `+`. */
     newLabel: string;
     load: () => Promise<{ oldText: string; newText: string }>;
-    /** Buttons under the diff; the modal closes after one has run. */
+    /** Buttons under the diff; whatever shows the diff is done once one has run. */
     actions?: DiffAction[];
     /** A warning shown above the diff, such as changes an action would replace. */
     warning?: string;
 };
+
+export type DiffModalOptions = DiffOptions & { title: string };
 
 /**
  * Two versions of a note as one unified diff, the way a code review shows a
@@ -50,117 +51,122 @@ export class DiffModal extends Modal {
     override onOpen(): void {
         this.setTitle(this.options.title);
         this.modalEl.addClass('proton-drive-sync-diff-modal');
-        this.contentEl.createEl('p', { text: 'Comparing…', cls: 'proton-drive-sync-muted' });
-        void this.load();
+        void showDiff(this.contentEl, this.options, () => this.close());
     }
 
     override onClose(): void {
         this.contentEl.empty();
     }
+}
 
-    private async load(): Promise<void> {
-        let texts: { oldText: string; newText: string };
-        try {
-            texts = await this.options.load();
-        } catch (error) {
-            this.contentEl.empty();
-            this.contentEl.createEl('p', {
-                text: `Could not load both versions: ${error instanceof Error ? error.message : String(error)}`,
-            });
-            return;
-        }
-        this.render(texts.oldText, texts.newText);
+/**
+ * Load both versions and show them as a diff in `container`, with the actions
+ * under it, the way {@link DiffModal} does; `done` runs once an action has.
+ * For a dialog that compares as one of its steps, such as a note's versions.
+ */
+export async function showDiff(container: HTMLElement, options: DiffOptions, done: () => void): Promise<void> {
+    container.empty();
+    container.createEl('p', { text: 'Comparing…', cls: 'proton-drive-sync-muted' });
+    let texts: { oldText: string; newText: string };
+    try {
+        texts = await options.load();
+    } catch (error) {
+        container.empty();
+        container.createEl('p', {
+            text: `Could not load both versions: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return;
+    }
+    renderDiff(container, texts.oldText, texts.newText, options, done);
+}
+
+function renderDiff(container: HTMLElement, oldText: string, newText: string, options: DiffOptions, done: () => void): void {
+    container.empty();
+
+    const result = diffLines(oldText, newText);
+    if (!result.ok) {
+        container.createEl('p', {
+            text:
+                result.reason === 'binary'
+                    ? 'These files are not text, so there is nothing to compare line by line.'
+                    : 'These versions differ in too many lines to compare here.',
+        });
+        renderActions(container, options, done);
+        return;
     }
 
-    private render(oldText: string, newText: string): void {
-        const { contentEl } = this;
-        contentEl.empty();
+    if (options.warning) {
+        container.createEl('p', { cls: 'proton-drive-sync-pin-warning', text: options.warning });
+    }
+    const header = container.createDiv({ cls: 'proton-drive-sync-diff-header' });
+    header.createSpan({ cls: 'proton-drive-sync-diff-legend mod-removed', text: `− ${options.oldLabel}` });
+    header.createSpan({ cls: 'proton-drive-sync-diff-legend mod-added', text: `+ ${options.newLabel}` });
+    const stats = header.createSpan({ cls: 'proton-drive-sync-diff-stats' });
+    stats.createSpan({ cls: 'mod-added', text: `+${result.added}` });
+    stats.appendText(' ');
+    stats.createSpan({ cls: 'mod-removed', text: `−${result.removed}` });
 
-        const result = diffLines(oldText, newText);
-        if (!result.ok) {
-            contentEl.createEl('p', {
-                text:
-                    result.reason === 'binary'
-                        ? 'These files are not text, so there is nothing to compare line by line.'
-                        : 'These versions differ in too many lines to compare here.',
-            });
-            this.renderActions();
-            return;
+    if (result.added === 0 && result.removed === 0) {
+        container.createEl('p', { text: 'The two versions are identical.' });
+        renderActions(container, options, done);
+        return;
+    }
+
+    const body = container.createDiv({ cls: 'proton-drive-sync-diff' });
+    for (const segment of toSegments(result.lines)) {
+        if (segment.kind === 'hunk') {
+            body.createDiv({ cls: 'proton-drive-sync-diff-hunk', text: segment.header });
+            renderLines(body, segment.lines);
+            continue;
         }
+        const count = segment.lines.length;
+        const fold = body.createEl('button', {
+            cls: 'proton-drive-sync-diff-fold',
+            text: `Show ${count} unchanged line${count === 1 ? '' : 's'}`,
+        });
+        fold.addEventListener('click', () => {
+            const placeholder = createDiv();
+            fold.replaceWith(placeholder);
+            renderLines(placeholder, segment.lines);
+            placeholder.replaceWith(...Array.from(placeholder.childNodes));
+        });
+    }
 
-        if (this.options.warning) {
-            contentEl.createEl('p', { cls: 'proton-drive-sync-pin-warning', text: this.options.warning });
-        }
-        const header = contentEl.createDiv({ cls: 'proton-drive-sync-diff-header' });
-        header.createSpan({ cls: 'proton-drive-sync-diff-legend mod-removed', text: `− ${this.options.oldLabel}` });
-        header.createSpan({ cls: 'proton-drive-sync-diff-legend mod-added', text: `+ ${this.options.newLabel}` });
-        const stats = header.createSpan({ cls: 'proton-drive-sync-diff-stats' });
-        stats.createSpan({ cls: 'mod-added', text: `+${result.added}` });
-        stats.appendText(' ');
-        stats.createSpan({ cls: 'mod-removed', text: `−${result.removed}` });
+    renderActions(container, options, done);
+}
 
-        if (result.added === 0 && result.removed === 0) {
-            contentEl.createEl('p', { text: 'The two versions are identical.' });
-            this.renderActions();
-            return;
-        }
+function renderActions(container: HTMLElement, options: DiffOptions, done: () => void): void {
+    const actions = options.actions ?? [];
+    if (actions.length === 0) {
+        return;
+    }
+    const hint = container.createEl('p', { cls: 'proton-drive-sync-diff-hint' });
+    hint.appendText('Choose the version to keep: ');
+    hint.createSpan({ cls: 'mod-removed', text: `red (−) keeps ${options.oldLabel}` });
+    hint.appendText(', ');
+    hint.createSpan({ cls: 'mod-added', text: `green (+) keeps ${options.newLabel}` });
+    hint.appendText('.');
 
-        const body = contentEl.createDiv({ cls: 'proton-drive-sync-diff' });
-        for (const segment of toSegments(result.lines)) {
-            if (segment.kind === 'hunk') {
-                body.createDiv({ cls: 'proton-drive-sync-diff-hunk', text: segment.header });
-                renderLines(body, segment.lines);
-                continue;
+    const setting = new Setting(container);
+    setting.settingEl.addClass('proton-drive-sync-diff-actions');
+    for (const action of actions) {
+        setting.addButton((button) => {
+            const sign = action.keeps === 'removed' ? '− ' : action.keeps === 'added' ? '+ ' : '';
+            button.setButtonText(`${sign}${action.label}`);
+            if (action.keeps) {
+                button.buttonEl.addClass('proton-drive-sync-diff-action', `mod-${action.keeps}`);
             }
-            const count = segment.lines.length;
-            const fold = body.createEl('button', {
-                cls: 'proton-drive-sync-diff-fold',
-                text: `Show ${count} unchanged line${count === 1 ? '' : 's'}`,
-            });
-            fold.addEventListener('click', () => {
-                const placeholder = createDiv();
-                fold.replaceWith(placeholder);
-                renderLines(placeholder, segment.lines);
-                placeholder.replaceWith(...Array.from(placeholder.childNodes));
-            });
-        }
-
-        this.renderActions();
-    }
-
-    private renderActions(): void {
-        const actions = this.options.actions ?? [];
-        if (actions.length === 0) {
-            return;
-        }
-        const hint = this.contentEl.createEl('p', { cls: 'proton-drive-sync-diff-hint' });
-        hint.appendText('Choose the version to keep: ');
-        hint.createSpan({ cls: 'mod-removed', text: `red (−) keeps ${this.options.oldLabel}` });
-        hint.appendText(', ');
-        hint.createSpan({ cls: 'mod-added', text: `green (+) keeps ${this.options.newLabel}` });
-        hint.appendText('.');
-
-        const setting = new Setting(this.contentEl);
-        setting.settingEl.addClass('proton-drive-sync-diff-actions');
-        for (const action of actions) {
-            setting.addButton((button) => {
-                const sign = action.keeps === 'removed' ? '− ' : action.keeps === 'added' ? '+ ' : '';
-                button.setButtonText(`${sign}${action.label}`);
-                if (action.keeps) {
-                    button.buttonEl.addClass('proton-drive-sync-diff-action', `mod-${action.keeps}`);
+            button.onClick(async () => {
+                button.setDisabled(true);
+                try {
+                    await action.run();
+                    done();
+                } catch (error) {
+                    new Notice(`${action.label} failed: ${error instanceof Error ? error.message : String(error)}`);
+                    button.setDisabled(false);
                 }
-                button.onClick(async () => {
-                    button.setDisabled(true);
-                    try {
-                        await action.run();
-                        this.close();
-                    } catch (error) {
-                        new Notice(`${action.label} failed: ${error instanceof Error ? error.message : String(error)}`);
-                        button.setDisabled(false);
-                    }
-                });
             });
-        }
+        });
     }
 }
 

@@ -1,4 +1,12 @@
-import type { NoteSyncState, PendingChange, PendingReason, SyncStatus, SyncSummary, TransferProgress } from '../sync/engine';
+import type {
+    NoteSyncState,
+    PendingChange,
+    PendingReason,
+    SyncStatus,
+    SyncSummary,
+    TransferAction,
+    TransferProgress,
+} from '../sync/engine';
 import { basename } from '../sync/paths';
 
 /**
@@ -46,7 +54,7 @@ const PRESENTATION: Record<SyncStatus, Presentation> = {
 };
 
 /** Why a path is not synced, as the sync panel and the current-note indicator put it. */
-export const PENDING_TEXT: Record<PendingReason, string> = {
+const PENDING_TEXT: Record<PendingReason, string> = {
     transferring: 'Uploading or downloading now',
     waiting: 'Waiting to be synced',
     wifi: 'Waiting for Wi-Fi',
@@ -55,6 +63,21 @@ export const PENDING_TEXT: Record<PendingReason, string> = {
     'name-clash': 'Its name clashes with another apart from letter case',
     conflict: 'Changed in two places; waiting for your decision',
 };
+
+/** A transfer under way, by what it does: which way the file is going, or why it is going away. */
+const TRANSFER_TEXT: Record<TransferAction, string> = {
+    upload: 'Uploading now',
+    download: 'Downloading now',
+    'delete-local': 'Deleted on another device; removing it here now',
+    'delete-remote': 'Deleted here; removing it from Drive now',
+    conflict: 'Changed in two places; settling it now',
+};
+
+/** Why a path is not synced, with any detail in brackets. */
+export function pendingText(change: PendingChange): string {
+    const reason = change.transfer ? TRANSFER_TEXT[change.transfer] : PENDING_TEXT[change.reason];
+    return change.detail ? `${reason} (${change.detail})` : reason;
+}
 
 /** The current note's standing, as the indicator beside the sync icon shows it. */
 export type NoteIndicator = {
@@ -75,11 +98,11 @@ export function noteIndicator(state: NoteSyncState, change: PendingChange | unde
     if (!change) {
         return { state, transferring, text: 'This note has changes not synced yet.' };
     }
-    const reason = PENDING_TEXT[change.reason];
+    const reason = pendingText(change);
     return {
         state,
         transferring,
-        text: `This note is not in sync yet: ${reason.charAt(0).toLowerCase()}${reason.slice(1)}${change.detail ? ` (${change.detail})` : ''}.`,
+        text: `This note is not in sync yet: ${reason.charAt(0).toLowerCase()}${reason.slice(1)}.`,
     };
 }
 

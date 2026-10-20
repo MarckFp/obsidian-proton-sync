@@ -27,7 +27,7 @@ import type { ChosenFolder } from './ui/folderPickerModal';
 import { SyncEngine, type ConflictEvent, type OpenEditor, type SyncPlan, type SyncSummary } from './sync/engine';
 import { SyncState } from './sync/state';
 import { formatLogEntries, Logger } from './util/logger';
-import { compareConflictCopyOf, compareWithConflictCopy, compareWithVersion, conflictPairsFor } from './ui/compare';
+import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor, versionComparison } from './ui/compare';
 import { showConflictNotice } from './ui/conflictNotice';
 import { ConflictsModal } from './ui/conflictsModal';
 import { FirstSyncModal } from './ui/firstSyncModal';
@@ -126,16 +126,17 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                     summary: () => this.summary,
                     pendingChanges: () => this.engine.pendingChanges(),
                     activeNote: () => this.app.workspace.getActiveFile()?.path ?? null,
-                    canListVersions: () => this.isConfigured() && !this.locked,
+                    canListVersions: () => this.isConfigured() && !this.locked && this.engine.isConnected(),
                     versionsKey: (path) => this.engine.versionsKey(path),
                     noteVersions: (path) => this.engine.noteVersions(path),
-                    openVersion: (path, version) => compareWithVersion(this, path, version),
+                    compareVersion: (path, version) => versionComparison(this, path, version),
                     shareNote: (path) => this.shareNote(path),
                     recentlyDeleted: () => this.engine.recentlyDeleted(),
                     restoreDeleted: async (item) => {
                         await this.engine.restoreDeleted(item);
                         new Notice(`Restored "${item.path}"; it is back in the vault after the next check.`);
                     },
+                    pollSeconds: () => this.engine.pollSeconds(),
                     sharedBy: () => this.settings.remoteFolderSharedBy,
                     openFile: (path) => void this.app.workspace.openLinkText(path, '', false),
                     syncNow: () => void this.syncNowOrSetUp(),

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import type { SyncSummary } from '../src/sync/engine';
-import { noteIndicator, statusIcon, statusLabel, timeAgo } from '../src/ui/syncStatus';
+import { noteIndicator, pendingText, statusIcon, statusLabel, timeAgo } from '../src/ui/syncStatus';
 
 const base: SyncSummary = {
     status: 'idle',
@@ -78,7 +78,27 @@ describe('noteIndicator', () => {
         assert.equal(noteIndicator('pending', undefined).text, 'This note has changes not synced yet.');
     });
 
-    it('marks a note whose transfer is under way', () => {
-        assert.equal(noteIndicator('pending', { path: 'a.md', reason: 'transferring' }).transferring, true);
+    it('marks a note whose transfer is under way, and says which way it is going', () => {
+        const indicator = noteIndicator('pending', { path: 'a.md', reason: 'transferring', transfer: 'download' });
+        assert.equal(indicator.transferring, true);
+        assert.equal(indicator.text, 'This note is not in sync yet: downloading now.');
+    });
+});
+
+describe('pendingText', () => {
+    it('says whether a file under way is going up or coming down', () => {
+        assert.equal(pendingText({ path: 'a.md', reason: 'transferring', transfer: 'upload' }), 'Uploading now');
+        assert.equal(pendingText({ path: 'a.md', reason: 'transferring', transfer: 'download' }), 'Downloading now');
+        assert.equal(
+            pendingText({ path: 'a.md', reason: 'transferring', transfer: 'delete-remote' }),
+            'Deleted here; removing it from Drive now',
+        );
+    });
+
+    it('adds the detail in brackets', () => {
+        assert.equal(
+            pendingText({ path: 'video.mp4', reason: 'too-large', detail: '2 MB' }),
+            'Over this device’s size limit, so not synced here (2 MB)',
+        );
     });
 });

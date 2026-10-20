@@ -55,12 +55,12 @@ same implementation Proton's own clients use.
 - **Edits arriving while you type are merged in.** A new version of a note you
   have open is brought into the editor without moving the cursor, and if you
   have unsaved typing, merged with it rather than written underneath it.
-- **Share a note.** **Copy Proton Drive share link** (command palette, or the
-  link button beside the note's versions in the sync panel) makes a read-only
-  public link to the note on Drive, optionally with a password and an expiry,
-  and copies it. The same dialog copies an existing link or stops sharing.
-- **Recently deleted.** The sync panel lists the vault's files in Drive's trash,
-  deleted from any device, and brings one back with a tap.
+- **Share a note.** **Copy Proton Drive share link** (command palette, or
+  **Share link** in the sync panel) makes a read-only public link to the note
+  on Drive, optionally with a password and an expiry, and copies it. The same
+  dialog copies an existing link or stops sharing.
+- **Recently deleted.** The sync panel keeps a list of the vault's files in
+  Drive's trash, deleted from any device, and brings one back once you confirm.
 - **Shared vaults.** Pick a folder from **Shared with me** to use a vault
   together: share the folder in Proton Drive with editor access, and everyone it
   is shared with can sync it into a vault of their own.
@@ -256,24 +256,30 @@ Click the status bar item to sync now, or to resume when paused. Right-click it
 for **Pause syncing**, **Show sync conflicts**, the sync panel and the settings.
 
 The **sync panel** shows the same status in the right sidebar, with the details
-(progress, last sync, last error), buttons for **Sync now**, **Pause**/**Resume**
-and the settings, and a **Conflicts** button under them. Below that are the
-changes not synced yet, and the **versions of the note you are viewing** on
-Proton Drive: up to the last 50, newest first, ten to a page, each with its date
-and size. Choose one to compare it with the note as it is now, in the same red
-and green diff as conflicts, and **Restore this version** to bring it back. A
-restore is written into the note and synced as a new version, so the version it
-replaces stays in the history and the restore can itself be undone. The link
-button beside the versions shares the note (see below).
+(progress, last sync, last error) and its buttons two to a row: **Sync now** and
+**Pause**/**Resume**; **Share link** for the note you are viewing (see below)
+and **Conflicts**; **Versions of** that note and **Recently deleted**; and
+**Settings** across the bottom. Below them are the changes not synced yet.
 
-**Recently deleted**, at the bottom, lists the vault's files in Drive's trash
-when you ask for it: up to 50, most recently deleted first, from any device.
-**Restore** takes one out of the trash and the next check brings it back into
+**Versions of** opens the versions of the note you are viewing on Proton Drive:
+up to the last 50, newest first, ten to a page, each with its date and size,
+the current one marked. Choose one to compare it with the note as it is now, in
+the same red and green diff as conflicts, and **Restore this version** to bring
+it back; **All versions** goes back to the list. A restore is written into the
+note and synced as a new version, so the version it replaces stays in the
+history and the restore can itself be undone. The panel lists the versions
+whenever you open a note, and again when it syncs a new version, so the list is
+ready when you open it.
+
+**Recently deleted** opens the vault's files in Drive's trash: up to 50, most
+recently deleted first, ten to a page, from any device. **Restore** asks first,
+then takes the file out of the trash, and the next check brings it back into
 the vault. A file whose folder was deleted too comes back with that folder; a
-folder deleted as a whole, from Proton's apps say, is listed for itself.
-Listing the trash covers the whole account, so it is not done each time the
-panel opens. Files deleted from Drive's trash, or after it was emptied, are
-gone.
+folder deleted as a whole, from Proton's apps say, is listed for itself. The
+panel lists the trash once the sync is up and again as often as Drive is
+checked for changes, but not while syncing is paused, offline or waiting for
+Wi-Fi; opening the dialog lists it then. Files deleted from Drive's trash, or
+after it was emptied, are gone.
 
 **Sharing a note.** **Copy Proton Drive share link** opens a dialog for the
 note in view. If it has no link yet, choose an optional password and an expiry
@@ -306,9 +312,10 @@ the note's header instead, turns into a spinning sync icon while that note
 transfers, and opens the sync panel when tapped.
 
 The sync panel's **Not synced yet** list shows every change still waiting, with
-the reason: about to sync, uploading or downloading, waiting for Wi-Fi, failed
-and retrying (with when it tries next), over this device's size limit, a name
-clash, or a conflict waiting for you. Tap a file to open it.
+the reason: about to sync, uploading, downloading, being removed after a
+deletion elsewhere, waiting for Wi-Fi, failed and retrying (with when it tries
+next), over this device's size limit, a name clash, or a conflict waiting for
+you. Tap a file to open it.
 
 **Notes open in an editor.** When a new version of a note arrives while it is
 open, it is brought into the editor as an edit, so the cursor stays where it is.

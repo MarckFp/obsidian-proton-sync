@@ -60,7 +60,19 @@ export type PendingReason =
     | 'name-clash'
     | 'conflict';
 
-export type PendingChange = { path: string; reason: PendingReason; detail?: string };
+/**
+ * What a transfer under way does: the kinds of `SyncAction` that wait for a
+ * transfer slot. Settling a conflict may move the file either way, or both.
+ */
+export type TransferAction = 'upload' | 'download' | 'delete-local' | 'delete-remote' | 'conflict';
+
+export type PendingChange = {
+    path: string;
+    reason: PendingReason;
+    /** For a transfer under way, what it does. */
+    transfer?: TransferAction;
+    detail?: string;
+};
 
 /** One version of a note in Drive's revision history. */
 export type NoteVersion = {
@@ -73,7 +85,7 @@ export type NoteVersion = {
 };
 
 
-/** A file of the vault in Drive's trash, for the panel's "Recently deleted" list. */
+/** A file of the vault in Drive's trash, for the "Recently deleted" dialog. */
 export type DeletedItem = {
     uid: string;
     /** Where it was in the vault. */

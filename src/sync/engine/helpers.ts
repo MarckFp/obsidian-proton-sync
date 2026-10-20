@@ -2,6 +2,7 @@ import type { PluginSettings } from '../../settings';
 import type { RemoteTree } from '../drive';
 import { isWithin, replacePrefix } from '../paths';
 import type { LocalState, RemoteState, SyncAction, SyncBase } from '../types';
+import type { TransferAction } from './types';
 
 /** Small pure helpers the engine's modules share. */
 
@@ -24,7 +25,8 @@ export function transferSize(action: SyncAction, local: LocalState | undefined, 
     }
 }
 
-export function needsTransfer(action: SyncAction): boolean {
+/** Whether an action waits for a transfer slot; see {@link TransferAction}. */
+export function needsTransfer(action: SyncAction): action is Extract<SyncAction, { type: TransferAction }> {
     return action.type !== 'noop' && action.type !== 'forget' && action.type !== 'adopt';
 }
 
