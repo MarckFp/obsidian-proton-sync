@@ -64,12 +64,12 @@ export type SyncPanelHost = {
  * what the status bar shows on desktop plus the controls behind its menu.
  * Available on desktop too, for anyone who wants the detail at a glance.
  *
- * The controls sit two to a row: syncing and pausing; sharing the note in
- * view, and conflicts; the note's versions, and recently deleted files, each
- * in a dialog of its own; and the settings across the bottom. Both dialogs
- * open on lists the panel keeps ready: the note's versions whenever it changes,
- * and the trash from the moment the sync is up, again as often as Drive is
- * checked for changes.
+ * The controls sit one to a row, each the full width of the panel: syncing and
+ * pausing; sharing the note in view, and conflicts; the note's versions, and
+ * recently deleted files, each in a dialog of its own; and the settings. Both
+ * dialogs open on lists the panel keeps ready: the note's versions whenever it
+ * changes, and the trash from the moment the sync is up, again as often as
+ * Drive is checked for changes.
  *
  * Built once and then updated in place, so a button is never replaced under
  * a finger while progress updates arrive.
@@ -146,8 +146,8 @@ export class SyncPanelView extends ItemView {
 
         this.detailsEl = root.createEl('ul', { cls: 'proton-drive-sync-panel-details' });
 
-        // Two to a row, in the order they are reached for; the settings,
-        // needed least, across the bottom.
+        // One to a row, in the order they are reached for; the settings,
+        // needed least, at the bottom.
         const actions = root.createDiv({ cls: 'proton-drive-sync-panel-actions' });
         this.syncButton = new ButtonComponent(actions).setCta().onClick(() => this.host.syncNow());
         this.pauseButton = new ButtonComponent(actions).onClick(() => this.host.togglePause());
@@ -161,9 +161,7 @@ export class SyncPanelView extends ItemView {
         this.deletedButton = labelButton(new ButtonComponent(actions), 'trash-2', 'Recently deleted').onClick(() =>
             this.openDeleted(),
         );
-        labelButton(new ButtonComponent(actions), 'settings', 'Settings')
-            .onClick(() => this.host.openSettings())
-            .buttonEl.addClass('proton-drive-sync-panel-wide');
+        labelButton(new ButtonComponent(actions), 'settings', 'Settings').onClick(() => this.host.openSettings());
 
         this.pendingHeadingEl = root.createEl('h6', { cls: 'proton-drive-sync-panel-heading' });
         this.pendingEl = root.createDiv({ cls: 'proton-drive-sync-panel-pending' });
@@ -204,10 +202,9 @@ export class SyncPanelView extends ItemView {
         }
 
         // Locked, the main action is unlocking: that is what "sync now" does
-        // then, and with nothing to pause it takes the whole row.
+        // then, and there is nothing to pause.
         const locked = summary.status === 'locked';
         labelButton(this.syncButton, locked ? 'lock-open' : 'refresh-cw', locked ? 'Unlock' : 'Sync now');
-        this.syncButton.buttonEl.toggleClass('proton-drive-sync-panel-wide', locked);
         this.pauseButton.buttonEl.toggle(!locked);
 
         const paused = summary.status === 'paused';
@@ -261,7 +258,9 @@ export class SyncPanelView extends ItemView {
         }
         this.notePath = path;
 
-        labelButton(this.versionsButton, 'history', path === null ? 'Versions' : `Versions of ${basename(path)}`);
+        // A long note name is cut short on the button; the tooltip has it whole.
+        const versionsLabel = path === null ? 'Versions' : `Versions of ${basename(path)}`;
+        labelButton(this.versionsButton, 'history', versionsLabel).setTooltip(versionsLabel);
         this.versionsButton.setDisabled(!available);
         this.shareButton.setDisabled(!available);
     }

@@ -256,10 +256,11 @@ Click the status bar item to sync now, or to resume when paused. Right-click it
 for **Pause syncing**, **Show sync conflicts**, the sync panel and the settings.
 
 The **sync panel** shows the same status in the right sidebar, with the details
-(progress, last sync, last error) and its buttons two to a row: **Sync now** and
-**Pause**/**Resume**; **Share link** for the note you are viewing (see below)
-and **Conflicts**; **Versions of** that note and **Recently deleted**; and
-**Settings** across the bottom. Below them are the changes not synced yet.
+(progress, last sync, last error) and its buttons, one to a row and each the
+full width of the panel: **Sync now**, **Pause**/**Resume**, **Share link** for
+the note you are viewing (see below), **Conflicts**, **Versions of** that note,
+**Recently deleted** and **Settings**. Below them are the changes not synced
+yet.
 
 **Versions of** opens the versions of the note you are viewing on Proton Drive:
 up to the last 50, newest first, ten to a page, each with its date and size,

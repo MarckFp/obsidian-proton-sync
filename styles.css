@@ -242,27 +242,21 @@
     font-size: var(--font-ui-small);
 }
 
-/* The panel's actions, two to a row, with Settings across the bottom. */
+/* The panel's actions, one to a row. */
 .proton-drive-sync-panel-actions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    flex-direction: column;
     gap: var(--size-4-2);
     margin: var(--size-4-3) 0;
 }
 
-/* As wide as its column, and as tall as its label, which takes two lines in a
-   narrow sidebar rather than being cut short after a few letters. */
+/* The full width of the panel and all the same height, a little taller than
+   Obsidian's usual button, so each is an easy target for a mouse or a finger. */
 .proton-drive-sync-panel-actions > button {
     display: flex;
     width: 100%;
-    height: auto;
-    min-height: var(--input-height);
-    padding: var(--size-4-1) var(--size-4-2);
-}
-
-/* Settings, and Unlock while there is nothing to pause, take the whole row. */
-.proton-drive-sync-panel-actions > .proton-drive-sync-panel-wide {
-    grid-column: 1 / -1;
+    height: calc(var(--input-height) + var(--size-4-2));
+    padding: 0 var(--size-4-3);
 }
 
 /* A button with an icon beside its label; see `labelButton`. */
@@ -284,15 +278,13 @@ button.proton-drive-sync-labelled {
     flex-shrink: 0;
 }
 
+/* One line, cut short with an ellipsis, so a long note name cannot make its
+   button taller than the rest. */
 .proton-drive-sync-button-text {
-    display: -webkit-box;
     min-width: 0;
     overflow: hidden;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    white-space: normal;
-    overflow-wrap: anywhere;
-    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .proton-drive-sync-panel-heading {
