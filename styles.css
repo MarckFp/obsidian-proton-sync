@@ -242,11 +242,57 @@
     font-size: var(--font-ui-small);
 }
 
+/* The panel's actions, two to a row, with Settings across the bottom. */
 .proton-drive-sync-panel-actions {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--size-4-2);
     margin: var(--size-4-3) 0;
+}
+
+/* As wide as its column, and as tall as its label, which takes two lines in a
+   narrow sidebar rather than being cut short after a few letters. */
+.proton-drive-sync-panel-actions > button {
+    display: flex;
+    width: 100%;
+    height: auto;
+    min-height: var(--input-height);
+    padding: var(--size-4-1) var(--size-4-2);
+}
+
+/* Settings, and Unlock while there is nothing to pause, take the whole row. */
+.proton-drive-sync-panel-actions > .proton-drive-sync-panel-wide {
+    grid-column: 1 / -1;
+}
+
+/* A button with an icon beside its label; see `labelButton`. */
+button.proton-drive-sync-labelled {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--size-4-1);
+}
+
+/* The button itself takes every click, however its content is redrawn. */
+.proton-drive-sync-button-icon,
+.proton-drive-sync-button-text {
+    pointer-events: none;
+}
+
+.proton-drive-sync-button-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.proton-drive-sync-button-text {
+    display: -webkit-box;
+    min-width: 0;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: center;
 }
 
 .proton-drive-sync-panel-heading {
@@ -364,33 +410,24 @@ button.proton-drive-sync-diff-action.mod-added:hover {
     }
 }
 
-/* Sync panel: the Conflicts button under the main actions, and the note's versions */
+/* Versions and recently deleted dialogs: a line on what is listed, with a
+   refresh button, then ten rows to a page. */
 
-.proton-drive-sync-panel-wide {
-    width: 100%;
-    margin-bottom: var(--size-4-3);
-}
-
-.proton-drive-sync-panel-history-heading {
+.proton-drive-sync-list-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: var(--size-4-2);
 }
 
-.proton-drive-sync-panel-history-heading h6 {
-    margin: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.proton-drive-sync-panel-versions {
+.proton-drive-sync-list {
     display: flex;
     flex-direction: column;
     gap: var(--size-4-1);
+    margin-top: var(--size-4-2);
 }
 
-button.proton-drive-sync-panel-version {
+button.proton-drive-sync-version {
     display: block;
     width: 100%;
     height: auto;
@@ -401,16 +438,16 @@ button.proton-drive-sync-panel-version {
     background-color: var(--background-secondary);
 }
 
-button.proton-drive-sync-panel-version:hover {
+button.proton-drive-sync-version:hover {
     background-color: var(--background-modifier-hover);
 }
 
-.proton-drive-sync-panel-version-date {
+.proton-drive-sync-version-date {
     font-size: var(--font-ui-small);
     color: var(--text-normal);
 }
 
-.proton-drive-sync-panel-badge {
+.proton-drive-sync-badge {
     margin-inline-start: var(--size-4-2);
     padding: 0 var(--size-4-1);
     border-radius: var(--radius-s);
@@ -419,12 +456,19 @@ button.proton-drive-sync-panel-version:hover {
     font-size: var(--font-ui-smaller);
 }
 
-.proton-drive-sync-panel-pager {
+/* Wraps on a narrow phone screen rather than squeezing "Page 2 of 5". */
+.proton-drive-sync-pager {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: var(--size-4-2);
-    margin-top: var(--size-4-2);
+    margin-top: var(--size-4-3);
+}
+
+/* Back from comparing a version to the list of them. */
+.proton-drive-sync-back {
+    margin-bottom: var(--size-4-3);
 }
 
 /* Before a pass has a total to measure against, the bar only says work is under way. */
@@ -451,9 +495,11 @@ button.proton-drive-sync-panel-version:hover {
     }
 }
 
-/* "Recently deleted": the file and when, with its Restore button beside it. */
-.proton-drive-sync-panel-deleted {
+/* "Recently deleted": the file and when, with its Restore button beside it,
+   or under it, kept to the end of the row, on a narrow phone screen. */
+.proton-drive-sync-deleted {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--size-4-2);
     padding: var(--size-4-2) var(--size-4-3);
@@ -461,11 +507,15 @@ button.proton-drive-sync-panel-version:hover {
     background-color: var(--background-secondary);
 }
 
-.proton-drive-sync-panel-deleted-text {
-    flex: 1;
+.proton-drive-sync-deleted-text {
+    flex: 1 1 12em;
     min-width: 0;
     font-size: var(--font-ui-small);
     overflow-wrap: anywhere;
+}
+
+.proton-drive-sync-deleted > button {
+    margin-inline-start: auto;
 }
 
 /* The share link, selectable in full. */

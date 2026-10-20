@@ -65,13 +65,14 @@ import {
     type SyncPlan,
     type SyncStatus,
     type SyncSummary,
+    type TransferAction,
     type VaultScope,
 } from './engine/types';
 
-/** Items listed in the panel's "Recently deleted", at most. */
+/** Items listed in "Recently deleted", at most. */
 const MAX_DELETED_LISTED = 50;
 
-/** Versions of a note listed in the panel's history, at most. */
+/** Versions of a note listed in its history, at most. */
 const MAX_NOTE_VERSIONS = 50;
 
 type PendingRename = { from: string; to: string; isFolder: boolean };
@@ -176,8 +177,8 @@ export class SyncEngine {
     private readonly pace: TransferPace;
     /** When Drive is checked next; see {@link PollScheduler}. */
     private readonly polls: PollScheduler;
-    /** Paths with a transfer under way. */
-    private readonly inFlight = new Set<string>();
+    /** Paths with a transfer under way, and what each transfer does. */
+    private readonly inFlight = new Map<string, TransferAction>();
     /**
      * Drive revisions merged into an open editor, by path. When the editor
      * saves, the note differs from its base on both sides, which reads as a
@@ -305,8 +306,8 @@ export class SyncEngine {
             }
         };
         const held = this.networkHeld();
-        for (const path of this.inFlight) {
-            add(path, 'transferring');
+        for (const [path, transfer] of this.inFlight) {
+            found.set(path, { path, reason: 'transferring', transfer });
         }
         for (const { path } of this.state.conflicts()) {
             add(path, 'conflict');
@@ -355,6 +356,16 @@ export class SyncEngine {
 
     isPaused(): boolean {
         return this.paused;
+    }
+
+    /** Whether Drive can be asked for a note's versions, the trash and share links: started, and not stopped since. */
+    isConnected(): boolean {
+        return this.running && this.drive !== null;
+    }
+
+    /** Seconds until Drive is next checked for changes, at the pace of the moment; see {@link PollScheduler.interval}. */
+    pollSeconds(): number {
+        return this.polls.interval();
     }
 
     /** Apply changed settings without a restart, resyncing if the scope changed. */
@@ -925,11 +936,16 @@ export class SyncEngine {
                         await this.applyAction(path, decision.action, decision.local, decision.remote);
                         return;
                     }
+                    const action = decision.action.type;
                     const transferOne = async () => {
                         if (decision && (await this.localMoved(path, decision.local))) {
                             decision = await this.decide(path, remoteStates.get(path), limit);
                         }
                         for (let attempt = 1; decision; attempt++) {
+                            if (needsTransfer(decision.action)) {
+                                // Decided again, it may now go the other way.
+                                this.inFlight.set(path, decision.action.type);
+                            }
                             try {
                                 await this.applyAction(path, decision.action, decision.local, decision.remote);
                                 return;
@@ -956,7 +972,7 @@ export class SyncEngine {
                     // `run` claims its place synchronously, so the next path
                     // may go as soon as it has been called.
                     const transfer = transfers.run(async () => {
-                        this.inFlight.add(path);
+                        this.inFlight.set(path, action);
                         try {
                             await transferOne();
                         } finally {

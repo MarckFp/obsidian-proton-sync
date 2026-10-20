@@ -42,6 +42,7 @@ export class PluginSettingTab {}
 export class Modal {}
 export class Notice {}
 export class Setting {}
+export class ButtonComponent {}
 export class TFile {}
 export class TFolder {}
 export class TAbstractFile {}

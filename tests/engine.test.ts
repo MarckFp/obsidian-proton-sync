@@ -4,7 +4,7 @@ import { afterEach, describe, it } from 'node:test';
 import { DriveEventType, type ProtonDriveClient } from '@protontech/drive-sdk';
 
 import { DEFAULT_SETTINGS, type PluginSettings } from '../src/settings';
-import { SyncEngine, type ConflictEvent, type EngineEnvironment } from '../src/sync/engine';
+import { SyncEngine, type ConflictEvent, type EngineEnvironment, type PendingChange } from '../src/sync/engine';
 import { SyncState } from '../src/sync/state';
 import { Logger } from '../src/util/logger';
 import { requestStats } from '../src/util/requestStats';
@@ -1419,6 +1419,35 @@ describe('SyncEngine — what is not synced yet, and why', () => {
         assert.match(change.detail!, /failed 1 time; next try with the next check/);
     });
 
+    it('says whether a file under way is going up or coming down', async () => {
+        const vault = new MemoryVault();
+        vault.write('note.md', 'v1');
+        const { drive, engine, settled } = await setup({ vault });
+        const seen: PendingChange[][] = [];
+
+        drive.duringRevisionUpload = () => {
+            drive.duringRevisionUpload = null;
+            seen.push(engine.pendingChanges());
+        };
+        vault.write('note.md', 'edited here');
+        engine.onVaultChange('note.md');
+        await settled();
+
+        drive.duringDownload = () => {
+            drive.duringDownload = null;
+            seen.push(engine.pendingChanges());
+        };
+        drive.emit(drive.put('note.md', 'edited on the phone'));
+        engine.pollNow();
+        await settled();
+
+        assert.deepEqual(seen, [
+            [{ path: 'note.md', reason: 'transferring', transfer: 'upload' }],
+            [{ path: 'note.md', reason: 'transferring', transfer: 'download' }],
+        ]);
+        assert.deepEqual(engine.pendingChanges(), []);
+    });
+
     it('tells whether one note is in sync, including edits nothing has queued yet', async () => {
         const vault = new MemoryVault();
         vault.write('note.md', 'v1');
@@ -1538,6 +1567,17 @@ describe('SyncEngine — a note’s versions on Drive', () => {
     it('has none for a note not on Drive yet', async () => {
         const { engine } = await setup();
         assert.equal(await engine.noteVersions('never-synced.md'), null);
+    });
+
+    it('can be listed once the sync has started, and not after it stops', async () => {
+        const { drive, engine } = await setup({ start: false });
+        assert.equal(engine.isConnected(), false);
+
+        await engine.start(drive.client() as unknown as ProtonDriveClient, SYNC_ROOT);
+        assert.equal(engine.isConnected(), true);
+
+        await engine.stop();
+        assert.equal(engine.isConnected(), false);
     });
 
     it('marks the listing stale once the note syncs a new version', async () => {
