@@ -8,12 +8,12 @@ import {
 } from '@protontech/drive-sdk';
 import type { App } from 'obsidian';
 
-import type { PluginSettings } from '../settings';
+import { DEVICES_FOLDER, type PluginSettings } from '../settings';
 import { PathBatcher } from '../util/debounce';
-import { requestStats } from '../util/requestStats';
 import type { Logger } from '../util/logger';
 import { Limiter, runPooled } from '../util/pool';
 import { ConflictResolver, MAX_MERGE_BYTES } from './conflicts';
+import type { DeviceRegistry } from './devices';
 import { isTextPath } from './media';
 import { mergeThreeWay } from './merge';
 import { DriveIO, sharedWithOthers, type NodeLocation, type RemoteTree, type ShareLink, type UploadSource } from './drive';
@@ -162,8 +162,6 @@ export class SyncEngine {
     private status: SyncStatus = 'signed-out';
     private lastSyncedAt: number | null = null;
     private lastError: string | null = null;
-    private uploaded = 0;
-    private downloaded = 0;
     private paused = false;
     /** A full sync was asked for while the network was held; it runs once it is not. */
     private deferredFullSync = false;
@@ -236,6 +234,9 @@ export class SyncEngine {
     /** Folder path to node uid, rebuilt on every full sync. */
     private readonly folderUids = new Map<string, string>();
 
+    /** The vault's device list, whose changes the event feed passes on rather than syncs; see {@link watchDevices}. */
+    private devices: DeviceRegistry | null = null;
+
     constructor(
         app: App,
         private readonly state: SyncState,
@@ -282,13 +283,10 @@ export class SyncEngine {
             lastSyncedAt: this.lastSyncedAt,
             lastError: this.lastError,
             conflicts: this.state.conflicts().length,
-            uploaded: this.uploaded,
-            downloaded: this.downloaded,
             progress: this.progress.counts(),
             progressFraction: this.progress.fraction(),
             transfer: this.progress.largestTransfer(),
             pending: this.pendingChanges().length,
-            requestsLastHour: requestStats.lastHour(),
         };
     }
 
@@ -366,6 +364,17 @@ export class SyncEngine {
     /** Seconds until Drive is next checked for changes, at the pace of the moment; see {@link PollScheduler.interval}. */
     pollSeconds(): number {
         return this.polls.interval();
+    }
+
+    /**
+     * Follow the vault's device list in `registry`, or stop with null. Its
+     * folder is never part of the vault, so changes to it in the event feed
+     * are passed on through `onDevicesChanged` rather than synced, without the
+     * lookups an unknown change would cost. The folder is learned from the
+     * listing of a full sync, or when another device makes it.
+     */
+    watchDevices(registry: DeviceRegistry | null): void {
+        this.devices = registry;
     }
 
     /** Apply changed settings without a restart, resyncing if the scope changed. */
@@ -631,6 +640,10 @@ export class SyncEngine {
             this.folderUids.set('', rootUid);
             for (const [path, uid] of tree.folders) {
                 this.folderUids.set(path, uid);
+            }
+            const devicesFolder = tree.folders.get(DEVICES_FOLDER);
+            if (devicesFolder !== undefined) {
+                this.devices?.knowFolder(devicesFolder);
             }
 
             // Before anything is compared by path, make sure the paths agree:
@@ -1160,7 +1173,6 @@ export class SyncEngine {
                 }
             }
             const result = await drive.uploadRevision(nodeUid, source, signal, onProgress);
-            this.uploaded++;
             this.state.setSynced(path, result.nodeUid, 'file', baseOf(local, result.revisionUid));
             this.logger.debug(`Uploaded "${path}"`);
             if (previousRevision) {
@@ -1193,7 +1205,6 @@ export class SyncEngine {
             }
             throw error;
         }
-        this.uploaded++;
         this.state.setSynced(path, result.nodeUid, 'file', baseOf(local, result.revisionUid));
         this.logger.debug(`Uploaded "${path}"`);
     }
@@ -1275,7 +1286,6 @@ export class SyncEngine {
         const parentUid = await this.ensureRemoteFolder(parentPath(path));
         const result = await this.drive!.uploadNewFile(parentUid, basename(path), source, this.abortController?.signal);
 
-        this.uploaded++;
         this.state.setSynced(path, result.nodeUid, 'file', baseOf(local, result.revisionUid));
     }
 
@@ -1300,7 +1310,6 @@ export class SyncEngine {
             return;
         }
         const written = await this.fetchInto(path, revisionUid, remote?.size, remote?.mtime, local);
-        this.downloaded++;
         this.state.setSynced(path, nodeUid, 'file', baseOf(written, revisionUid));
         if (this.adoptingSettings && this.filter.isConfigPath(path)) {
             this.adoptingSettings.push(path);
@@ -1354,7 +1363,6 @@ export class SyncEngine {
                 editor.replace(remoteText);
             }
             const written = await this.vault.writeBinary(path, data, remote?.mtime);
-            this.downloaded++;
             this.state.setSynced(path, nodeUid, 'file', baseOf(written, revisionUid));
             this.logger.debug(`Downloaded "${path}" into its open editor`);
             return;
@@ -2331,14 +2339,26 @@ export class SyncEngine {
         }
         if (readError !== null) {
             this.reportFailure('Could not read Drive events', readError);
+        } else if (this.status === 'idle') {
+            // Drive was checked and all it had is in: synced as of now, even
+            // when nothing changed. Without this a quiet vault would read as
+            // not synced for hours, however often Drive is checked.
+            this.lastSyncedAt = Date.now();
+            this.hooks.onChange(this.getSummary());
         }
         await this.state.flush();
     }
 
-    private async applyRemoteEvents(events: NodeChange[]): Promise<void> {
+    private async applyRemoteEvents(changes: NodeChange[]): Promise<void> {
         const paths = new Set(this.state.dueRetries());
         const confirmedAbsent = new Set<string>();
         const goneFolders: string[] = [];
+
+        // The device list's files are not the vault's: passed on, not synced.
+        const events = changes.filter((event) => !(this.devices?.takeChange(event) ?? false));
+        if (events.length < changes.length) {
+            this.hooks.onDevicesChanged?.();
+        }
 
         const nodeUids = [...new Set(events.map((event) => event.nodeUid))];
         // Folders before files: a folder renamed or trashed on Drive changes
@@ -2457,6 +2477,10 @@ export class SyncEngine {
                 await this.vault.ensureFolder(path);
                 this.folderUids.set(path, location.node.uid);
                 this.state.setSynced(path, location.node.uid, 'folder');
+            } else if (location.path === DEVICES_FOLDER && this.devices) {
+                // Another device has just started the vault's device list.
+                this.devices.knowFolder(location.node.uid);
+                this.hooks.onDevicesChanged?.();
             }
             return null;
         }

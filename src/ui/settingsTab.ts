@@ -71,6 +71,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
             this.accountGroup(),
             this.folderGroup(),
             this.syncingGroup(),
+            this.devicesGroup(),
             this.conflictsGroup(),
             this.scopeGroup(),
             this.mobileGroup(),
@@ -352,6 +353,30 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
     }
 
     // -- conflicts ---------------------------------------------------------
+
+    private devicesGroup(): SettingDefinitionItem {
+        return {
+            type: 'group',
+            heading: 'Devices',
+            items: [
+                {
+                    name: 'Devices syncing this vault',
+                    desc:
+                        'Each device that syncs this vault with this version of the plugin or later lists itself, ' +
+                        'with when it last synced. Pause, resume or remove the others from the list: each acts on ' +
+                        'it the next time it checks Drive, and a removed device signs out. Older versions and ' +
+                        'Proton’s own apps neither list themselves nor take requests. Off for a vault shared with ' +
+                        'other people.',
+                    aliases: ['device list', 'remove device', 'whitelist'],
+                    render: (setting) => {
+                        setting.addButton((button) =>
+                            button.setButtonText('Show devices').onClick(() => this.plugin.showDevices()),
+                        );
+                    },
+                },
+            ],
+        };
+    }
 
     private conflictsGroup(): SettingDefinitionItem {
         const policy = this.plugin.settings.conflictPolicy;

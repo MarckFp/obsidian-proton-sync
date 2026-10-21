@@ -3,9 +3,12 @@ import { afterEach, describe, it } from 'node:test';
 
 import { DriveEventType, type ProtonDriveClient } from '@protontech/drive-sdk';
 
-import { DEFAULT_SETTINGS, type PluginSettings } from '../src/settings';
+import { DEFAULT_SETTINGS, DEVICES_FOLDER, type PluginSettings } from '../src/settings';
+import { DeviceRegistry } from '../src/sync/devices';
+import { DriveIO } from '../src/sync/drive';
 import { SyncEngine, type ConflictEvent, type EngineEnvironment, type PendingChange } from '../src/sync/engine';
 import { SyncState } from '../src/sync/state';
+import { sha1Hex } from '../src/util/hash';
 import { Logger } from '../src/util/logger';
 import { requestStats } from '../src/util/requestStats';
 import { FakeDrive, MemoryVault, SYNC_ROOT, VOLUME_ROOT } from './support/fakes';
@@ -26,6 +29,7 @@ async function setup(
         environment?: EngineEnvironment;
         start?: boolean;
         onSettingsAdopted?: (paths: string[]) => void;
+        onDevicesChanged?: () => void;
     } = {},
 ) {
     const vault = options.vault ?? new MemoryVault();
@@ -53,6 +57,7 @@ async function setup(
                 adopted.push(...paths);
                 options.onSettingsAdopted?.(paths);
             },
+            onDevicesChanged: () => options.onDevicesChanged?.(),
         },
         { configDir: '.obsidian', pluginDir: PLUGIN_DIR, pluginId: 'proton-drive-sync' },
         options.environment,
@@ -536,6 +541,27 @@ describe('SyncEngine — the Drive event feed', () => {
         await settled();
 
         assert.equal(fullSyncs.count, 0);
+    });
+
+    it('counts a check that finds nothing new as a sync, but not one that fails', async () => {
+        const { drive, engine, settled } = await setup();
+        await settled();
+        const before = engine.getSummary().lastSyncedAt!;
+
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        engine.pollNow();
+        await settled();
+        const checked = engine.getSummary().lastSyncedAt!;
+        assert.ok(checked > before, 'a quiet vault still reads as recently synced');
+
+        // The feed fails as it hands over a change made on another device.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        drive.emit(drive.put('elsewhere.md', 'from another device'));
+        drive.failEventsAfter = 0;
+        engine.pollNow();
+        await settled();
+        assert.equal(engine.getSummary().status, 'offline');
+        assert.equal(engine.getSummary().lastSyncedAt, checked);
     });
 
     it('brings in a file created on another device inside a new folder', async () => {
@@ -1674,6 +1700,75 @@ describe('SyncEngine — sharing a note', () => {
     it('refuses a note that is not on Drive yet', async () => {
         const { engine } = await setup();
         await assert.rejects(engine.noteShareLink('never-synced.md'), /not on Proton Drive yet/);
+    });
+});
+
+describe('SyncEngine — the device list', () => {
+    const RECORD = `${DEVICES_FOLDER}/device-laptop.json`;
+
+    function registryOn(drive: FakeDrive): DeviceRegistry {
+        return new DeviceRegistry(new DriveIO(drive.client() as unknown as ProtonDriveClient, SILENT), SYNC_ROOT, SILENT);
+    }
+
+    it('never brings the list into the vault, nor takes it off Drive', async () => {
+        const drive = new FakeDrive();
+        drive.put(RECORD, '{"id":"laptop"}');
+        const { vault, settled } = await setup({ drive });
+        await settled();
+
+        assert.equal(vault.read(RECORD), undefined);
+        assert.equal(drive.text(RECORD), '{"id":"laptop"}');
+    });
+
+    it('leaves the list on Drive alone, even where an older version synced it and it is gone here', async () => {
+        const drive = new FakeDrive();
+        const node = drive.put(RECORD, 'v1');
+        const { engine, state, settled } = await setup({ drive, start: false });
+        // As a version from before the list left it: synced, and recorded.
+        state.setSynced(RECORD, node.uid, 'file', {
+            hash: await sha1Hex(new TextEncoder().encode('v1').buffer),
+            size: 2,
+            localMtime: 1,
+            remoteRevisionUid: node.revision!.uid,
+        });
+
+        await engine.start(drive.client() as unknown as ProtonDriveClient, SYNC_ROOT);
+        await settled();
+        assert.equal(drive.text(RECORD), 'v1', 'not read as deleted on this device');
+    });
+
+    it('passes changes to the list on instead of syncing them, without looking them up', async () => {
+        const drive = new FakeDrive();
+        let changes = 0;
+        const { vault, engine, settled } = await setup({ drive, onDevicesChanged: () => changes++ });
+        const registry = registryOn(drive);
+        registry.knowFolder(drive.ensureFolderPath(DEVICES_FOLDER));
+        engine.watchDevices(registry);
+        const lookups = drive.lookups;
+
+        drive.emit(drive.put(`${DEVICES_FOLDER}/request-me.json`, '{}'), DriveEventType.NodeCreated);
+        engine.pollNow();
+        await settled();
+
+        assert.equal(changes, 1);
+        assert.equal(drive.lookups, lookups);
+        assert.equal(vault.read(`${DEVICES_FOLDER}/request-me.json`), undefined);
+    });
+
+    it('learns where the list is when another device starts it', async () => {
+        const drive = new FakeDrive();
+        let changes = 0;
+        const { engine, settled } = await setup({ drive, onDevicesChanged: () => changes++ });
+        const registry = registryOn(drive);
+        engine.watchDevices(registry);
+
+        const folder = drive.ensureFolderPath(DEVICES_FOLDER);
+        drive.emit(drive.nodes.get(folder)!, DriveEventType.NodeCreated);
+        engine.pollNow();
+        await settled();
+
+        assert.equal(changes, 1);
+        assert.equal(registry.takeChange({ nodeUid: 'file', parentNodeUid: folder }), true);
     });
 });
 

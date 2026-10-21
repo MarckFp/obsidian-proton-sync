@@ -2,20 +2,17 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import type { SyncSummary } from '../src/sync/engine';
-import { noteIndicator, pendingText, statusIcon, statusLabel, timeAgo } from '../src/ui/syncStatus';
+import { lastSynced, noteIndicator, pendingText, statusDetails, statusIcon, statusLabel, timeAgo } from '../src/ui/syncStatus';
 
 const base: SyncSummary = {
     status: 'idle',
     lastSyncedAt: null,
     lastError: null,
     conflicts: 0,
-    uploaded: 0,
-    downloaded: 0,
     progress: null,
     transfer: null,
     pending: 0,
     progressFraction: null,
-    requestsLastHour: 0,
 };
 
 describe('statusLabel', () => {
@@ -44,6 +41,25 @@ describe('statusLabel', () => {
     it('names the paused and Wi-Fi states', () => {
         assert.equal(statusLabel({ ...base, status: 'paused' }), 'Paused');
         assert.equal(statusLabel({ ...base, status: 'waiting-for-wifi' }), 'Waiting for Wi-Fi');
+    });
+});
+
+describe('lastSynced', () => {
+    const now = 1_000_000_000;
+
+    it('is overdue once the last sync is over an hour old', () => {
+        assert.equal(lastSynced({ ...base, lastSyncedAt: now - 59 * 60_000 }, now)?.overdue, false);
+        assert.equal(lastSynced({ ...base, lastSyncedAt: now - 60 * 60_000 }, now)?.overdue, false);
+        assert.equal(lastSynced({ ...base, lastSyncedAt: now - 61 * 60_000 }, now)?.overdue, true);
+    });
+
+    it('has nothing to say before the first sync', () => {
+        assert.equal(lastSynced(base, now), null);
+    });
+
+    it('is shown on its own, not among the details', () => {
+        const details = statusDetails({ ...base, lastSyncedAt: now, lastError: 'offline' });
+        assert.deepEqual(details, ['Last error: offline']);
     });
 });
 

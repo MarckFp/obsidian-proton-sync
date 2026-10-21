@@ -1,7 +1,7 @@
 import { Menu, setIcon, setTooltip } from 'obsidian';
 
 import type { SyncSummary } from '../sync/engine';
-import { type NoteIndicator, statusDescription, statusDetails, statusIcon, statusLabel } from './syncStatus';
+import { lastSynced, type NoteIndicator, statusDescription, statusDetails, statusIcon, statusLabel } from './syncStatus';
 
 export type StatusBarActions = {
     syncNow: () => void;
@@ -79,12 +79,14 @@ export class StatusBar {
         }
 
         this.element.createSpan({ text: ` ${statusLabel(summary)}` });
+        const synced = lastSynced(summary);
         setTooltip(
             this.element,
             [
                 `Proton Drive Sync: ${statusDescription(summary)}`,
                 ...(this.note ? [this.note.text] : []),
                 ...statusDetails(summary),
+                ...(synced ? [synced.text] : []),
                 summary.status === 'paused'
                     ? 'Click to resume.'
                     : summary.status === 'locked'

@@ -7,7 +7,7 @@ import type { VersionComparison } from './compare';
 import { DeletedModal } from './deletedModal';
 import { DriveList } from './driveList';
 import { ListingSchedule } from './listingSchedule';
-import { pendingText, statusDescription, statusDetails, statusIcon, statusLabel } from './syncStatus';
+import { lastSynced, pendingText, statusDescription, statusDetails, statusIcon, statusLabel } from './syncStatus';
 import { VersionsModal } from './versionsModal';
 
 export const SYNC_PANEL_VIEW = 'proton-drive-sync-panel';
@@ -80,6 +80,9 @@ export class SyncPanelView extends ItemView {
     private descriptionEl!: HTMLElement;
     private progressEl!: HTMLElement;
     private progressFillEl!: HTMLElement;
+    private lastSyncedEl!: HTMLElement;
+    private lastSyncedIconEl!: HTMLElement;
+    private lastSyncedTextEl!: HTMLElement;
     private detailsEl!: HTMLElement;
     private syncButton!: ButtonComponent;
     private pauseButton!: ButtonComponent;
@@ -144,6 +147,10 @@ export class SyncPanelView extends ItemView {
         this.progressEl = root.createDiv({ cls: 'proton-drive-sync-panel-progress' });
         this.progressFillEl = this.progressEl.createDiv({ cls: 'proton-drive-sync-panel-progress-fill' });
 
+        this.lastSyncedEl = root.createDiv({ cls: 'proton-drive-sync-last-synced' });
+        this.lastSyncedIconEl = this.lastSyncedEl.createSpan({ cls: 'proton-drive-sync-last-synced-icon' });
+        this.lastSyncedTextEl = this.lastSyncedEl.createSpan({ cls: 'proton-drive-sync-last-synced-text' });
+
         this.detailsEl = root.createEl('ul', { cls: 'proton-drive-sync-panel-details' });
 
         // One to a row, in the order they are reached for; the settings,
@@ -195,6 +202,16 @@ export class SyncPanelView extends ItemView {
         this.progressEl.toggle(summary.status === 'syncing');
         this.progressEl.toggleClass('mod-indeterminate', fraction === null);
         this.progressFillEl.setCssProps({ width: fraction === null ? '' : `${Math.round(fraction * 100)}%` });
+
+        // Green while syncs keep coming, red once the last is over an hour
+        // old, each with its own icon so the colour is not the only sign.
+        const synced = lastSynced(summary);
+        this.lastSyncedEl.toggle(synced !== null);
+        if (synced) {
+            this.lastSyncedEl.toggleClass('mod-overdue', synced.overdue);
+            setIcon(this.lastSyncedIconEl, synced.overdue ? 'alert-triangle' : 'check-circle');
+            this.lastSyncedTextEl.setText(synced.text);
+        }
 
         this.detailsEl.empty();
         for (const line of statusDetails(summary)) {

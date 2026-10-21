@@ -242,6 +242,40 @@
     font-size: var(--font-ui-small);
 }
 
+/* When the vault last synced: green while syncs keep coming, red once the last
+   one is over an hour old. */
+.proton-drive-sync-last-synced {
+    display: flex;
+    align-items: center;
+    gap: var(--size-4-2);
+    margin: var(--size-4-2) 0;
+    padding: var(--size-4-2) var(--size-4-3);
+    border: 1px solid rgba(var(--color-green-rgb), 0.5);
+    border-radius: var(--radius-s);
+    background-color: rgba(var(--color-green-rgb), 0.12);
+    font-size: var(--font-ui-small);
+}
+
+.proton-drive-sync-last-synced.mod-overdue {
+    border-color: rgba(var(--color-red-rgb), 0.5);
+    background-color: rgba(var(--color-red-rgb), 0.12);
+}
+
+.proton-drive-sync-last-synced-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--color-green);
+}
+
+.proton-drive-sync-last-synced.mod-overdue .proton-drive-sync-last-synced-icon {
+    color: var(--color-red);
+}
+
+.proton-drive-sync-last-synced-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
 /* The panel's actions, one to a row. */
 .proton-drive-sync-panel-actions {
     display: flex;
@@ -255,7 +289,7 @@
 .proton-drive-sync-panel-actions > button {
     display: flex;
     width: 100%;
-    height: calc(var(--input-height) + var(--size-4-2));
+    height: calc(var(--input-height) + var(--size-4-1));
     padding: 0 var(--size-4-3);
 }
 
@@ -508,6 +542,42 @@ button.proton-drive-sync-version:hover {
 
 .proton-drive-sync-deleted > button {
     margin-inline-start: auto;
+}
+
+/* The device list: each device, how it stands and when it last synced, with
+   its buttons beside it, or under it, kept to the end of the row, on a narrow
+   phone screen. */
+.proton-drive-sync-device {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--size-4-2);
+    padding: var(--size-4-2) var(--size-4-3);
+    border-radius: var(--radius-s);
+    background-color: var(--background-secondary);
+}
+
+.proton-drive-sync-device-text {
+    flex: 1 1 14em;
+    min-width: 0;
+    font-size: var(--font-ui-small);
+    overflow-wrap: anywhere;
+}
+
+.proton-drive-sync-device-name {
+    font-weight: var(--font-semibold);
+}
+
+.proton-drive-sync-device-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--size-4-1);
+    margin-inline-start: auto;
+}
+
+.proton-drive-sync-device .proton-drive-sync-last-synced {
+    margin: var(--size-4-1) 0 0;
+    padding: var(--size-4-1) var(--size-4-2);
 }
 
 /* The share link, selectable in full. */

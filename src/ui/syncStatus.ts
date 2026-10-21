@@ -147,7 +147,26 @@ export function statusDescription(summary: SyncSummary): string {
     return PRESENTATION[summary.status].description;
 }
 
-/** Everything worth knowing beyond the label, one fact per line. */
+/** A last sync longer ago than this is overdue, and shown in red rather than green. */
+const OVERDUE_AFTER_MS = 60 * 60 * 1000;
+
+/**
+ * When the vault last synced, and whether that is overdue; null before the
+ * first sync since Obsidian started. Drive is checked every ten minutes at
+ * the slowest while syncing runs, so an hour without a sync means it has
+ * stopped: paused, offline, failing, or held for Wi-Fi.
+ */
+export function lastSynced(summary: SyncSummary, now = Date.now()): { text: string; overdue: boolean } | null {
+    if (summary.lastSyncedAt === null) {
+        return null;
+    }
+    return {
+        text: `Last synced ${new Date(summary.lastSyncedAt).toLocaleString()}`,
+        overdue: now - summary.lastSyncedAt > OVERDUE_AFTER_MS,
+    };
+}
+
+/** Everything worth knowing beyond the label, one fact per line; when it last synced is {@link lastSynced}. */
 export function statusDetails(summary: SyncSummary): string[] {
     const lines: string[] = [];
     if (summary.conflicts > 0) {
@@ -169,17 +188,6 @@ export function statusDetails(summary: SyncSummary): string[] {
         lines.push(
             `${transfer.direction === 'upload' ? 'Uploading' : 'Downloading'} ${transfer.path}: ` +
                 `${formatBytes(transfer.bytes)} of ${formatBytes(transfer.total)}`,
-        );
-    }
-    if (summary.lastSyncedAt !== null) {
-        lines.push(`Last synced ${new Date(summary.lastSyncedAt).toLocaleString()}`);
-    }
-    if (summary.uploaded > 0 || summary.downloaded > 0) {
-        lines.push(`Since Obsidian opened: ${summary.uploaded} uploaded, ${summary.downloaded} downloaded`);
-    }
-    if (summary.requestsLastHour > 0) {
-        lines.push(
-            `${summary.requestsLastHour} request${summary.requestsLastHour === 1 ? '' : 's'} to Proton in the last hour`,
         );
     }
     if (summary.lastError) {

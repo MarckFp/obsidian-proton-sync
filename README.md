@@ -61,6 +61,9 @@ same implementation Proton's own clients use.
   dialog copies an existing link or stops sharing.
 - **Recently deleted.** The sync panel keeps a list of the vault's files in
   Drive's trash, deleted from any device, and brings one back once you confirm.
+- **See the devices that sync a vault.** Each lists itself with when it last
+  synced, and any of them can pause, resume or remove the others; a removed
+  device signs out.
 - **Shared vaults.** Pick a folder from **Shared with me** to use a vault
   together: share the folder in Proton Drive with editor access, and everyone it
   is shared with can sync it into a vault of their own.
@@ -94,9 +97,8 @@ the window is hidden. The Proton Drive API has no push or websocket channel, so
 there is no way to do better than polling, and Proton's
 [usage guidelines](https://github.com/ProtonDriveApps/sdk#operational-requirements)
 ask third-party clients not to poll aggressively: an account that does can be
-rate-limited. The setting cannot go below 30 seconds, Proton's own rate. The
-sync panel's details show how many requests went to Proton in the last hour.
-This is a limit of the service, not of this plugin.
+rate-limited. The setting cannot go below 30 seconds, Proton's own rate. This
+is a limit of the service, not of this plugin.
 
 **The SDK is not released for third-party use yet.** Proton's README allows
 personal, non-commercial projects like this one and asks that they go through the
@@ -255,12 +257,15 @@ edit wins.
 Click the status bar item to sync now, or to resume when paused. Right-click it
 for **Pause syncing**, **Show sync conflicts**, the sync panel and the settings.
 
-The **sync panel** shows the same status in the right sidebar, with the details
-(progress, last sync, last error) and its buttons, one to a row and each the
-full width of the panel: **Sync now**, **Pause**/**Resume**, **Share link** for
-the note you are viewing (see below), **Conflicts**, **Versions of** that note,
+The **sync panel** shows the same status in the right sidebar: when the vault
+last synced, in green, or in red once that is over an hour ago, which means
+syncing has stopped (paused, offline, failing or waiting for Wi-Fi); the details
+(progress, last error); and its buttons, one to a row and each the full width
+of the panel: **Sync now**, **Pause**/**Resume**, **Share link** for the note
+you are viewing (see below), **Conflicts**, **Versions of** that note,
 **Recently deleted** and **Settings**. Below them are the changes not synced
-yet.
+yet. A check of Drive that finds nothing new counts as a sync, so a quiet vault
+stays green.
 
 **Versions of** opens the versions of the note you are viewing on Proton Drive:
 up to the last 50, newest first, ten to a page, each with its date and size,
@@ -335,9 +340,10 @@ look it over before sharing it.
 Regardless of settings: `.obsidian/workspace.json` and the other pane-layout and
 cache files (devices fight over them), this plugin's own folder (its settings
 and sync state belong to each device, and each device updates the plugin itself
-through Obsidian), `.trash/`, `.git/`, `.DS_Store`,
-`Thumbs.db`, and editor scratch files. `.obsidian` as a whole is excluded if you
-turn off **Sync Obsidian settings**.
+through Obsidian), the device list's `.proton-drive-sync` folder (see
+[Seeing and managing the devices that sync a vault](#seeing-and-managing-the-devices-that-sync-a-vault)),
+`.trash/`, `.git/`, `.DS_Store`, `Thumbs.db`, and editor scratch files.
+`.obsidian` as a whole is excluded if you turn off **Sync Obsidian settings**.
 
 Add your own exclusions as globs — `Private/`, `**/*.pdf` — in settings. A
 pattern that would not do what it looks like, such as one with a leading `/` or
@@ -414,6 +420,40 @@ devices never need to be online together. What to expect when they are:
   and you are told.
 - **On Windows, a file open in another program** (a video in a player, say) may
   be locked, and an update to it waits until the next sync after it is closed.
+
+### Seeing and managing the devices that sync a vault
+
+Each device that syncs the vault lists itself, shortly after its first sync:
+its name (the **Device name** setting), platform, plugin version and account,
+how it stands, and when it last synced, updated hourly while it syncs and
+whenever that changes. **Show devices** under **Devices** in the settings, or
+**Show devices syncing this vault** in the command palette, opens the list.
+
+From there you can **Pause**, **Resume** or **Remove** any other device. Each
+acts on it the next time it checks Drive, which for a device that is closed is
+when Obsidian next opens on it; until then the list says it was asked. A paused
+device stops syncing as if it had been paused by hand, and can be resumed from
+the list or on the device itself. A removed device stops syncing and signs out,
+and syncs the vault again only once someone signs in on it with the account's
+password. Nothing is deleted, on the device or on Drive. **Forget** takes a
+removed device, or one not heard from in a month, off the list.
+
+The list lives in a hidden `.proton-drive-sync` folder in the Drive folder,
+with one small file per device that only that device writes, and one for the
+requests left for it. Devices on versions from before the list sync that folder
+like any other hidden folder, which does no harm: they never write to it.
+
+It asks devices to cooperate; it cannot make them. Versions from before the
+list, Proton's own apps and anything else signed in to your account neither
+list themselves nor take requests, so the list shows who syncs with this
+plugin, not everyone who can reach the folder. To cut a device off for good,
+change your Proton password, or revoke its session in Proton's account settings
+under **Security**. If a device is reinstalled, or Obsidian's data is cleared
+on it, it lists itself again as a new device; forget the old entry.
+
+The list is off for a vault in someone else's Drive or shared with other
+people, whose devices would otherwise see yours, and could pause or remove
+them.
 
 ## How it works
 
@@ -533,16 +573,19 @@ and why it is there.
 - **Network.** The plugin talks to Proton's API (`*.proton.me`) and nothing
   else, through Obsidian's `requestUrl`. File contents and names are encrypted
   on the device before they leave it.
-- **Filesystem access outside the vault API (desktop only).** On desktop, files
-  over 32 MB are streamed with Node's `fs` and hashed with Node's `crypto`
-  instead of being read whole into memory, and large downloads are written to a
-  temporary file in the plugin's own folder and moved into place once complete;
-  one left unfinished by a crash is cleared at the next start. Only paths inside
-  the vault are opened, resolved through the adapter's own `getFullPath`. On
-  mobile, where there is no Node, everything goes through the adapter and large
-  files are read whole. Everywhere else, notes are written, renamed and deleted
-  through Obsidian's Vault API, and settings files in the config folder, which
-  that API cannot reach, through the adapter.
+- **Direct filesystem access (desktop only).** Obsidian's plugin page warns that
+  Node's `fs` can read and write any file on the system. This plugin only opens
+  paths inside the vault, resolved through the adapter's own `getFullPath`. On
+  desktop, files over 32 MB are streamed with Node's `fs` and hashed with Node's
+  `crypto` instead of being read whole into memory, and large downloads are
+  written to a temporary file in the plugin's own folder and moved into place
+  once complete; one left unfinished by a crash is cleared at the next start.
+  Obsidian's API has no way to read a file in pieces, so without `fs` a
+  multi-gigabyte video would have to fit in memory whole. On mobile, where there
+  is no Node, everything goes through the adapter and large files are read
+  whole. Everywhere else, notes are written, renamed and deleted through
+  Obsidian's Vault API, and settings files in the config folder, which that API
+  cannot reach, through the adapter.
 - **No telemetry.** The Drive SDK's metrics are dropped, not sent (see
   `src/proton/telemetry.ts`).
 - **Clipboard.** Write only, and only when you ask: "Copy link" in the sign-in

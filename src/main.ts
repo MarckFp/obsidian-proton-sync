@@ -24,12 +24,15 @@ import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
 import { ProtonSession } from './proton/session';
 import { DEFAULT_SETTINGS, type PluginSettings } from './settings';
 import type { ChosenFolder } from './ui/folderPickerModal';
+import { DeviceList, DeviceRegistry, nextRequestAt, type DeviceRequest } from './sync/devices';
+import { DriveIO, sharedWithOthers } from './sync/drive';
 import { SyncEngine, type ConflictEvent, type OpenEditor, type SyncPlan, type SyncSummary } from './sync/engine';
 import { SyncState } from './sync/state';
 import { formatLogEntries, Logger } from './util/logger';
 import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor, versionComparison } from './ui/compare';
 import { showConflictNotice } from './ui/conflictNotice';
 import { ConflictsModal } from './ui/conflictsModal';
+import { DeviceRemovedModal, DevicesModal } from './ui/devicesModal';
 import { FirstSyncModal } from './ui/firstSyncModal';
 import { PinFormModal, UnlockModal } from './ui/pinModals';
 import { ReloadModal } from './ui/reloadModal';
@@ -46,6 +49,12 @@ const STATE_FILE = 'sync-state.json';
 const CONFLICT_HISTORY_FILE = 'conflict-history.json';
 /** Local-storage key for the installation id; see {@link ProtonDriveSyncPlugin.installationId}. */
 const CLIENT_UID_KEY = 'proton-drive-sync-client-uid';
+/**
+ * Local-storage key for the last request from the device list this device
+ * acted on; see {@link DeviceList}. Kept with the installation id rather than
+ * in the settings, which another sync tool might copy to a different device.
+ */
+const HANDLED_REQUEST_KEY = 'proton-drive-sync-device-request-handled';
 
 /** Conflicts found within this long of each other share one notice. */
 const CONFLICT_NOTICE_DELAY_MS = 1500;
@@ -97,6 +106,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     /** What the settings tab last rendered from; see {@link refreshSettingsTab}. */
     private settingsTabKey = '';
     engine!: SyncEngine;
+    /** This device's place in the vault's device list; see {@link DeviceList}. */
+    devices!: DeviceList;
+    /** This installation's id: the SDK's client id, and the device's id on the device list. */
+    private clientUid!: string;
+    /** The device list is off because the vault is shared with other people; see {@link openDeviceList}. */
+    private devicesOffForSharing = false;
 
     private statusBar!: StatusBar;
     /** The ribbon icon standing in for the status bar on mobile; null on desktop. */
@@ -153,6 +168,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.registerInterval(window.setInterval(() => this.refreshStatus(), STATUS_REFRESH_MS));
 
         const clientUid = this.installationId();
+        this.clientUid = clientUid;
         const protonLogger = this.logger.getLogger('proton');
         this.sessionSlot = new PinProtectedSlot(
             new ObsidianSecretSlot(this.app.secretStorage, `proton-drive-sync-session-${clientUid}`),
@@ -193,6 +209,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 onChange: (summary) => this.onSyncChange(summary),
                 onConflict: (event) => this.onConflict(event),
                 onSettingsAdopted: (paths) => this.onSettingsAdopted(paths),
+                onDevicesChanged: () => void this.checkDeviceRequests(),
             },
             { configDir: this.app.vault.configDir, pluginDir: this.pluginDir(), pluginId: this.manifest.id },
             {
@@ -201,6 +218,21 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 isHidden: () => document.visibilityState === 'hidden',
                 openEditor: (path) => this.openEditor(path),
             },
+        );
+
+        this.devices = new DeviceList(
+            {
+                self: () => ({
+                    id: this.clientUid,
+                    name: this.settings.deviceName,
+                    platform: platformName(),
+                    pluginVersion: this.manifest.version,
+                    account: this.session.accountEmail ?? null,
+                }),
+                handled: () => Number(this.app.loadLocalStorage(HANDLED_REQUEST_KEY)) || 0,
+                setHandled: (at) => this.app.saveLocalStorage(HANDLED_REQUEST_KEY, at),
+            },
+            this.logger.getLogger('devices'),
         );
 
         this.summary = this.engine.getSummary();
@@ -229,6 +261,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         // Obsidian does not wait for unload, so there is nothing to hand the
         // promise to; `stop` cancels timers synchronously before it awaits.
         void this.engine.stop();
+        this.devices.open(null);
         void this.rememberUnlock();
     }
 
@@ -290,12 +323,16 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * preview, say) shows the preview again, since nothing has changed that
      * would make it less of a surprise.
      */
-    async setPaused(paused: boolean): Promise<void> {
+    async setPaused(paused: boolean, request?: DeviceRequest): Promise<void> {
+        if (request && this.settings.paused === paused) {
+            // Asked from another device for what is already the case.
+            return;
+        }
         this.settings.paused = paused;
         await this.saveSettings();
         if (paused) {
             this.engine.pause();
-            this.notify('syncing paused.');
+            this.notify(request ? requestNotice(request) : 'syncing paused.');
             return;
         }
         if (
@@ -307,7 +344,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             await this.saveSettings();
             return;
         }
-        this.notify('syncing resumed.');
+        this.notify(request ? requestNotice(request) : 'syncing resumed.');
         await this.engine.resume();
     }
 
@@ -435,6 +472,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.locked = true;
         this.logger.info(`Locked after ${this.settings.pinLockAfterMinutes} minute(s) away`);
         await this.engine.stop();
+        this.closeDeviceList();
         this.session.lock();
         this.sessionSlot.lock();
         await this.rememberedUnlock.clear();
@@ -458,9 +496,24 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         });
     }
 
+    /** Sign out, with the PIN first when there is one; see {@link endSession}. */
+    async signOut(): Promise<void> {
+        if (!(await this.confirmPin('sign out'))) {
+            return;
+        }
+        const revoked = await this.endSession();
+        this.notify(
+            revoked
+                ? 'signed out, and the session was ended on Proton.'
+                : 'signed out on this device, but Proton could not be reached to end the session. ' +
+                      'Revoke it under account.proton.me → Security → Sessions if you need it gone now.',
+        );
+        await this.reconnect();
+    }
+
     /**
-     * Sign out: with the PIN first when there is one, then ending the session
-     * on Proton's side before forgetting it here.
+     * End the session on Proton's side before forgetting it here. Resolves
+     * whether Proton confirmed it.
      *
      * The chosen Drive folder, and the sync state that describes it, go too.
      * Both belong to the account being signed out of, and the next sign-in
@@ -469,11 +522,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * or in the vault; signing in again and choosing a folder starts a fresh
      * first sync, which pairs up files that already match.
      */
-    async signOut(): Promise<void> {
-        if (!(await this.confirmPin('sign out'))) {
-            return;
-        }
+    private async endSession(): Promise<boolean> {
         await this.engine.stop();
+        this.closeDeviceList();
         const { revoked } = await this.session.signOut();
         this.pinEnabled = false;
         await this.rememberedUnlock.clear();
@@ -483,13 +534,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         await this.saveSettings();
         await this.state.reset();
         this.refreshSettingsTab();
-        this.notify(
-            revoked
-                ? 'signed out, and the session was ended on Proton.'
-                : 'signed out on this device, but Proton could not be reached to end the session. ' +
-                      'Revoke it under account.proton.me → Security → Sessions if you need it gone now.',
-        );
-        await this.reconnect();
+        return revoked;
     }
 
     /** Everything this device logged recently, with enough context to go in a bug report. */
@@ -555,6 +600,10 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             await this.session.clearCache();
         } else {
             await this.session.validateCache(this.state.cursorsFingerprint());
+        }
+        // Before anything syncs: what other devices asked of this one.
+        if (!(await this.openDeviceList(this.settings.remoteFolderUid))) {
+            return;
         }
         if (
             !this.settings.paused &&
@@ -658,10 +707,119 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         await this.connect();
     }
 
+    // -- device list -------------------------------------------------------
+
+    /**
+     * Open the vault's device list, and act on a request left for this device
+     * since it last looked. Resolves false when that was to remove it: it has
+     * signed out, and there is nothing to sync.
+     *
+     * Off for a vault in someone else's Drive or shared with others, whose
+     * devices would otherwise see this one, and could pause or remove it.
+     */
+    private async openDeviceList(rootUid: string): Promise<boolean> {
+        const client = this.session.getClient();
+        const logger = this.logger.getLogger('devices');
+        const shared =
+            this.settings.remoteFolderSharedBy !== null ||
+            (await sharedWithOthers(client, rootUid).catch((error: unknown) => {
+                logger.warn('Could not check whether the folder is shared; the device list stays off for now', error);
+                return true;
+            }));
+        const registry = shared ? null : new DeviceRegistry(new DriveIO(client, logger), rootUid, logger);
+        this.devices.open(registry);
+        this.engine.watchDevices(registry);
+        this.devicesOffForSharing = shared;
+
+        const request = await this.devices.pendingRequest();
+        if (!request) {
+            return true;
+        }
+        if (request.state === 'removed') {
+            await this.removedByAnotherDevice(request);
+            return false;
+        }
+        // The sync has not started: it starts from the setting.
+        if (this.settings.paused !== (request.state === 'paused')) {
+            this.settings.paused = request.state === 'paused';
+            await this.saveSettings();
+            this.notify(requestNotice(request));
+        }
+        return true;
+    }
+
+    private closeDeviceList(): void {
+        this.devices.open(null);
+        this.engine.watchDevices(null);
+        this.devicesOffForSharing = false;
+    }
+
+    /** The device list changed on Drive while syncing: act on a new request for this device, if there is one. */
+    private async checkDeviceRequests(): Promise<void> {
+        const request = await this.devices.pendingRequest();
+        if (!request) {
+            return;
+        }
+        if (request.state === 'removed') {
+            await this.removedByAnotherDevice(request);
+            return;
+        }
+        await this.setPaused(request.state === 'paused', request);
+    }
+
+    /**
+     * Another device removed this one from the vault's device list: say so on
+     * the list, sign out, and explain. Signing in again is what brings it back;
+     * the request stays handled, so it is not acted on a second time.
+     */
+    private async removedByAnotherDevice(request: DeviceRequest): Promise<void> {
+        this.logger.warn(`Removed from the device list by "${request.byName || request.by}"; signing out`);
+        await this.devices.recordRemoved();
+        await this.endSession();
+        this.showStatus({ ...this.engine.getSummary(), status: 'signed-out' });
+        new DeviceRemovedModal(this.app, request, () => this.openSetup()).open();
+    }
+
+    /** Whether the vault's device list can be shown: synced with an own folder that is not shared, and connected. */
+    devicesAvailable(): boolean {
+        return this.devices.current !== null && this.engine.isConnected() && !this.locked;
+    }
+
+    /** Every device syncing the vault, with ways to pause, resume or remove the others. */
+    showDevices(): void {
+        const registry = this.devices.current;
+        if (!registry || !this.devicesAvailable()) {
+            this.notify(
+                this.devicesOffForSharing
+                    ? 'the device list is off for a vault shared with other people.'
+                    : 'sign in, choose a Drive folder and unlock to see the devices syncing this vault.',
+            );
+            return;
+        }
+        new DevicesModal(this.app, {
+            selfId: this.clientUid,
+            list: () => registry.list(),
+            ask: async (entry, state) => {
+                // Read again, in case another device asked something since
+                // the dialog listed it: a request has to come after it.
+                const [record, request] = await Promise.all([registry.record(entry.id), registry.request(entry.id)]);
+                await registry.ask(entry.id, {
+                    state,
+                    at: nextRequestAt({ record, request }),
+                    by: this.clientUid,
+                    byName: this.settings.deviceName,
+                });
+            },
+            forget: (id) => registry.forget(id),
+        }).open();
+    }
+
     async saveSettings(): Promise<void> {
         await this.saveData(this.settings);
         this.logger.setLevel(this.settings.logLevel);
         this.engine.updateSettings(this.settings);
+        // The device name may have changed, which the device list shows.
+        this.devices.noteChange();
     }
 
     private async loadSettings(): Promise<void> {
@@ -716,6 +874,13 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             icon: 'alert-circle',
             name: 'Show sync conflicts',
             callback: () => new ConflictsModal(this.app, this).open(),
+        });
+
+        this.addCommand({
+            id: 'show-devices',
+            icon: 'monitor-smartphone',
+            name: 'Show devices syncing this vault',
+            callback: () => this.showDevices(),
         });
 
         this.addCommand({
@@ -850,6 +1015,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
 
     private onSyncChange(summary: SyncSummary): void {
         this.showStatus(summary);
+        this.devices.noteStatus(summary);
     }
 
     /** Show a summary everywhere the sync's state appears. */
@@ -1167,6 +1333,29 @@ function defaultDeviceName(): string {
     } catch {
         return 'this device';
     }
+}
+
+/** What the device list shows this device as running on. */
+function platformName(): string {
+    if (Platform.isIosApp) {
+        return Platform.isTablet ? 'iPad' : 'iPhone';
+    }
+    if (Platform.isAndroidApp) {
+        return Platform.isTablet ? 'Android tablet' : 'Android phone';
+    }
+    if (Platform.isMacOS) {
+        return 'macOS';
+    }
+    if (Platform.isWin) {
+        return 'Windows';
+    }
+    return Platform.isLinux ? 'Linux' : 'Desktop';
+}
+
+/** A pause or resume asked from another device, as this device's notice puts it. */
+function requestNotice(request: DeviceRequest): string {
+    const by = request.byName ? `"${request.byName}"` : 'another device';
+    return `syncing on this device was ${request.state === 'paused' ? 'paused' : 'resumed'} from ${by}.`;
 }
 
 /** The mobile header button: a spinning sync icon while the note transfers, else the dot. */

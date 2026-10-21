@@ -29,13 +29,13 @@ export type TransferProgress = {
 
 export type SyncSummary = {
     status: SyncStatus;
+    /**
+     * When the vault was last in sync: a pass finished, or a check of Drive
+     * found nothing left to do. Null before the first since Obsidian started.
+     */
     lastSyncedAt: number | null;
     lastError: string | null;
     conflicts: number;
-    uploaded: number;
-    downloaded: number;
-    /** Requests sent to Proton in the last hour, which is what its rate limits count. */
-    requestsLastHour: number;
     /** Paths not in sync right now, for whatever reason; see {@link SyncEngine.pendingChanges}. */
     pending: number;
     /**
@@ -187,6 +187,12 @@ export type EngineHooks = {
      * Drive. Obsidian only reads them at startup, so it needs a reload.
      */
     onSettingsAdopted?: (paths: string[]) => void;
+    /**
+     * Something changed in the vault's device list on Drive: a device updated
+     * its record, or left a request for another. Its files are never synced;
+     * see `SyncEngine.watchDevices`.
+     */
+    onDevicesChanged?: () => void;
 };
 
 /** Where this vault keeps things the path filter needs to know about. */
