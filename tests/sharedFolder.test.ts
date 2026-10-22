@@ -149,6 +149,21 @@ describe('SyncEngine — config that runs code, in a shared vault', () => {
         assert.equal(vault.read('.obsidian/community-plugins.json'), undefined);
     });
 
+    it('keeps plugins out under any other spelling of their folder', async () => {
+        const vault = new MemoryVault();
+        const drive = new FakeDrive();
+        drive.put('.Obsidian/plugins/evil/main.js', 'steal()');
+        drive.put('.obsidian./community-plugins.json', '["proton-drive-sync","evil"]');
+        drive.put('Note.md', 'hello');
+        drive.nodes.get(SYNC_ROOT)!.members = ['collaborator@proton.me'];
+
+        await startEngine(vault, drive, { syncObsidianConfig: true });
+
+        assert.equal(vault.read('Note.md'), 'hello');
+        assert.equal(vault.read('.Obsidian/plugins/evil/main.js'), undefined);
+        assert.equal(vault.read('.obsidian./community-plugins.json'), undefined);
+    });
+
     it('never uploads them either', async () => {
         const vault = new MemoryVault();
         vault.write('.obsidian/plugins/mine/main.js', 'my plugin');

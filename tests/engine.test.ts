@@ -1703,6 +1703,55 @@ describe('SyncEngine — sharing a note', () => {
     });
 });
 
+describe('SyncEngine — names on Drive that would lead out of the vault', () => {
+    const outside = (vault: MemoryVault) => [...vault.files.keys()].filter((path) => path.split('/').includes('..'));
+
+    it('never syncs a folder named .., nor anything in it', async () => {
+        const drive = new FakeDrive();
+        drive.put('../../poc.txt', 'from a collaborator');
+        drive.put('x/../.obsidian/plugins/evil/main.js', 'steal()');
+        drive.put('Note.md', 'hello');
+        const { vault, settled } = await setup({ drive, settings: { syncObsidianConfig: true } });
+        await settled();
+
+        assert.equal(vault.read('Note.md'), 'hello');
+        assert.deepEqual(outside(vault), []);
+        assert.equal(vault.read('.obsidian/plugins/evil/main.js'), undefined);
+        assert.equal(drive.text('../../poc.txt'), 'from a collaborator', 'left where it is on Drive');
+    });
+
+    it('never syncs a name with a slash in it, such as one spelling out the plugins folder', async () => {
+        const drive = new FakeDrive();
+        drive.put('decoy.js', 'steal()').name = '.obsidian/plugins/evil/main.js';
+        const { vault, settled } = await setup({ drive, settings: { syncObsidianConfig: true } });
+        await settled();
+
+        assert.deepEqual(
+            [...vault.files.keys()].filter((path) => path.includes('evil')),
+            [],
+        );
+    });
+
+    it('leaves a note alone when it is renamed on Drive to such a name', async () => {
+        const vault = new MemoryVault();
+        vault.write('note.md', 'mine');
+        const { drive, engine, settled } = await setup({ vault });
+        await settled();
+
+        const node = drive.at('note.md')!;
+        node.name = '../note.md';
+        drive.emit(node);
+        engine.pollNow();
+        await settled();
+        await engine.syncNow();
+        await settled();
+
+        assert.equal(vault.read('note.md'), 'mine');
+        assert.deepEqual(outside(vault), []);
+        assert.equal(node.trashed, false);
+    });
+});
+
 describe('SyncEngine — the device list', () => {
     const RECORD = `${DEVICES_FOLDER}/device-laptop.json`;
 

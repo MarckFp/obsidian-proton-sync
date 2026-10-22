@@ -10,7 +10,7 @@ import {
 } from '@protontech/drive-sdk';
 
 import type { Logger } from '../util/logger';
-import { joinPath } from './paths';
+import { isSafeName, joinPath } from './paths';
 import type { RemoteState } from './types';
 
 /** A snapshot of the Drive subtree the vault maps onto. */
@@ -179,9 +179,16 @@ export class DriveIO {
 
                 const name = nodeName(child);
                 if (name === undefined) {
-                    // An undecryptable name cannot be mapped to a vault path.
-                    // Skipping is the only safe response; guessing a filename
-                    // would create a duplicate on the next sync.
+                    // A name that cannot be decrypted, or that would lead out
+                    // of the vault, cannot be mapped to a vault path. Skipping
+                    // is the only safe response; guessing a filename would
+                    // create a duplicate on the next sync.
+                    if (child.name.ok) {
+                        this.logger.warn(
+                            `Ignoring ${JSON.stringify(child.name.value)} in "${folder.path || '/'}" on Drive: ` +
+                                'not a name a file or folder can safely have in the vault',
+                        );
+                    }
                     tree.skipped.push(joinPath(folder.path, `<${child.uid}>`));
                     continue;
                 }
@@ -551,7 +558,7 @@ export class DriveIO {
     logSkipped(tree: RemoteTree): void {
         if (tree.skipped.length > 0) {
             this.logger.warn(
-                `Skipped ${tree.skipped.length} Drive item(s) whose name could not be decrypted: ` +
+                `Skipped ${tree.skipped.length} Drive item(s) whose name could not be decrypted or is not safe: ` +
                     tree.skipped.slice(0, 5).join(', '),
             );
         }
@@ -662,9 +669,13 @@ function uploadMetadata(source: UploadSource) {
     };
 }
 
-/** The decrypted name, or undefined when it could not be decrypted. */
+/**
+ * The decrypted name, or undefined when it could not be decrypted or is not
+ * a name a file can safely have in the vault; see {@link isSafeName}. Either
+ * way the node is left alone, as one whose name cannot be read is.
+ */
 function nodeName(node: NodeEntity): string | undefined {
-    return node.name.ok ? node.name.value : undefined;
+    return node.name.ok && isSafeName(node.name.value) ? node.name.value : undefined;
 }
 
 function toRemoteState(node: NodeEntity): RemoteState | undefined {

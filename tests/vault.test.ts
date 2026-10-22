@@ -18,6 +18,37 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
     return Buffer.concat(chunks);
 }
 
+describe('VaultIO — paths that would lead out of the vault', () => {
+    const disk = diskVault();
+    let vault: VaultIO;
+
+    before(() => {
+        exposeNodeRequire();
+        vault = new VaultIO(disk.app, SILENT);
+    });
+    after(() => disk.cleanup());
+
+    it('refuses to stream, write, read or move anything outside the vault', async () => {
+        const name = `escaped-${process.pid}.txt`;
+        const outside = disk.full(`../${name}`);
+        writeFileSync(disk.full('note.md'), 'in the vault');
+
+        for (const attempt of [
+            () => vault.openDownload(`../${name}`),
+            () => vault.writeBinary(`a/../../${name}`, new ArrayBuffer(4)),
+            () => vault.getState(`../${name}`),
+            () => vault.openUpload(`x/../../${name}`),
+            () => vault.ensureFolder('..'),
+            () => vault.rename('note.md', `../${name}`),
+            () => vault.copy('note.md', `../${name}`),
+        ]) {
+            await assert.rejects(attempt, /outside the vault/);
+        }
+        assert.equal(existsSync(outside), false);
+        assert.equal(readFileSync(disk.full('note.md'), 'utf8'), 'in the vault');
+    });
+});
+
 describe('VaultIO on desktop', () => {
     const disk = diskVault();
     let vault: VaultIO;

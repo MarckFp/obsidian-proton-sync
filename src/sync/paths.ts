@@ -35,6 +35,56 @@ export function ancestorPaths(path: string): string[] {
     return ancestors;
 }
 
+/**
+ * Whether a name from Drive can be one segment of a vault path, on every
+ * device the vault might sync to.
+ *
+ * Names on Drive are end-to-end encrypted, so Proton's servers cannot check
+ * them, and the SDK only checks their length: anyone who can write to the
+ * folder can give a file or folder any name at all. `..`, or a name with a
+ * `/` in it, would make a path that leads out of the vault, or around the
+ * exclusions that keep code out of a shared one. `\` separates segments on
+ * Windows, which also drops a segment's trailing dots and spaces, so a name
+ * made only of dots and spaces is no safer there; and Node refuses NUL in a
+ * path. A name like these could not be written on every device anyway.
+ */
+export function isSafeName(name: string): boolean {
+    return name !== '' && !/^[. ]+$/.test(name) && !/[/\\\0]/.test(name);
+}
+
+/**
+ * Whether a vault path stays inside the vault once the operating system
+ * resolves it: relative, and with no segment that is empty, `.` or `..`. On
+ * Windows, where `\` separates segments too, a segment's trailing dots and
+ * spaces are dropped, and `C:` names a drive, none made only of dots and
+ * spaces, and no drive. The last check before anything touches the disk; see
+ * {@link isSafeName} for where names from Drive are checked first.
+ */
+export function staysInVault(path: string, windows: boolean): boolean {
+    if (path === '') {
+        return true;
+    }
+    if (path.includes('\0') || (windows && /^[a-z]:/i.test(path))) {
+        return false;
+    }
+    const outside = windows ? /^[. ]*$/ : /^\.{0,2}$/;
+    return path.split(windows ? /[\\/]/ : '/').every((segment) => !outside.test(segment));
+}
+
+/**
+ * A path as a case-insensitive filesystem, and Windows, would take it: letter
+ * case folded, and each segment's trailing dots and spaces dropped, as Windows
+ * drops them. There `.Obsidian/plugins./x` is the same folder as
+ * `.obsidian/plugins/x`, so an exclusion that keeps code out must catch both;
+ * see {@link PathFilter}.
+ */
+export function aliasKey(path: string): string {
+    return path
+        .split('/')
+        .map((segment) => segment.replace(/[. ]+$/, '').toLowerCase())
+        .join('/');
+}
+
 /** True when `path` is `folder` itself or anything below it. */
 export function isWithin(path: string, folder: string): boolean {
     return folder === '' || path === folder || path.startsWith(`${folder}/`);
@@ -61,7 +111,15 @@ export function splitExtension(path: string): { stem: string; extension: string 
  * list is consulted for every file in the vault on every full reconciliation.
  */
 export class PathFilter {
-    private readonly matchers: RegExp[];
+    /**
+     * The plugin's own exclusions: matched against {@link aliasKey}, so that
+     * no other spelling of an excluded path, such as `.Obsidian/plugins` on a
+     * filesystem that ignores letter case, gets past the ones that keep code
+     * out of a shared vault.
+     */
+    private readonly builtIn: RegExp[];
+    /** The user's own patterns, matched as written. */
+    private readonly user: RegExp[];
 
     constructor(
         userPatterns: string[],
@@ -71,18 +129,18 @@ export class PathFilter {
         /** The vault is shared with others: never sync config that runs code; see {@link codeExclusions}. */
         sharedWithOthers = false,
     ) {
-        const patterns = [
-            ...ALWAYS_EXCLUDED,
-            ...configExclusions(configDir, pluginDir),
-            ...userPatterns.map((p) => p.trim()).filter(Boolean),
-        ];
+        const patterns = [...ALWAYS_EXCLUDED, ...configExclusions(configDir, pluginDir)];
         if (!syncObsidianConfig) {
             patterns.push(`${configDir}/**`, configDir);
         }
         if (sharedWithOthers) {
             patterns.push(...codeExclusions(configDir));
         }
-        this.matchers = patterns.map(globToRegExp);
+        this.builtIn = patterns.map((pattern) => globToRegExp(aliasKey(pattern)));
+        this.user = userPatterns
+            .map((p) => p.trim())
+            .filter(Boolean)
+            .map(globToRegExp);
     }
 
     /** Whether the path lives in the vault's config folder. */
@@ -91,7 +149,8 @@ export class PathFilter {
     }
 
     isExcluded(path: string): boolean {
-        return this.matchers.some((matcher) => matcher.test(path));
+        const alias = aliasKey(path);
+        return this.builtIn.some((matcher) => matcher.test(alias)) || this.user.some((matcher) => matcher.test(path));
     }
 
     /** True when the path itself, or any folder above it, is excluded. */
