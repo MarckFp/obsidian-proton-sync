@@ -344,6 +344,14 @@ through Obsidian), the device list's `.proton-drive-sync` folder (see
 [Seeing and managing the devices that sync a vault](#seeing-and-managing-the-devices-that-sync-a-vault)),
 `.trash/`, `.git/`, `.DS_Store`, `Thumbs.db`, and editor scratch files.
 `.obsidian` as a whole is excluded if you turn off **Sync Obsidian settings**.
+These are matched however a path is spelled, so `.Obsidian/` or `.obsidian./`,
+which Windows and macOS treat as the same folder, are excluded too.
+
+Nor is anything on Drive whose name could lead out of the vault: `..`, a name
+made only of dots and spaces, or one containing `/` or `\`. Names on Drive are
+end-to-end encrypted, so Proton cannot check them, and anyone who can write to
+a shared folder could otherwise use them to write files outside the vault.
+Such items are left alone on Drive and named in the sync log.
 
 Add your own exclusions as globs — `Private/`, `**/*.pdf` — in settings. A
 pattern that would not do what it looks like, such as one with a leading `/` or

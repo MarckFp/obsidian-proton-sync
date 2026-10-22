@@ -4,14 +4,69 @@ import { describe, it } from 'node:test';
 import { mediaTypeOf } from '../src/sync/media';
 import {
     PathFilter,
+    aliasKey,
     ancestorPaths,
     checkExcludePatterns,
     conflictCopyOriginal,
     conflictCopyPath,
+    isSafeName,
     isWithin,
     replacePrefix,
     splitExtension,
+    staysInVault,
 } from '../src/sync/paths';
+
+describe('names and paths that could lead out of the vault', () => {
+    it('takes ordinary names, and refuses ones that would leave the vault or split into several', () => {
+        for (const name of ['Note.md', '.obsidian', 'Meeting 10:30.md', 'a..b', '...md', 'Ünïcödé', '.trash']) {
+            assert.equal(isSafeName(name), true, name);
+        }
+        for (const name of ['', '.', '..', '...', '. .', ' ', 'a/b', '.obsidian/plugins/evil/main.js', '..\\x', 'a\\b', 'nul\0']) {
+            assert.equal(isSafeName(name), false, JSON.stringify(name));
+        }
+    });
+
+    it('keeps a path inside the vault, as each system would resolve it', () => {
+        for (const path of ['', 'Note.md', 'Folder/Note.md', '.obsidian/app.json', 'a\\b.md']) {
+            assert.equal(staysInVault(path, false), true, path);
+        }
+        for (const path of ['..', '../x', 'a/../../x', '/etc/passwd', 'a//b', './x', 'x\0']) {
+            assert.equal(staysInVault(path, false), false, path);
+        }
+        // On Windows `\` separates too, trailing dots and spaces go, and a drive is absolute.
+        assert.equal(staysInVault('a\\b.md', true), true);
+        for (const path of ['..\\x', 'a\\..\\..\\x', 'C:/Windows/x', 'c:x', '... /x', 'a/. /x']) {
+            assert.equal(staysInVault(path, true), false, path);
+        }
+    });
+
+    it('spells a path as a system that ignores case and trailing dots would', () => {
+        assert.equal(aliasKey('.Obsidian/Plugins./evil /main.js'), '.obsidian/plugins/evil/main.js');
+    });
+});
+
+describe('PathFilter — other spellings of an excluded path', () => {
+    const shared = new PathFilter([], true, '.obsidian', '.obsidian/plugins/proton-drive-sync', true);
+
+    it('keeps code out of a shared vault however the path is spelled', () => {
+        for (const path of [
+            '.obsidian/plugins/evil/main.js',
+            '.Obsidian/plugins/evil/main.js',
+            '.obsidian./plugins/evil/main.js',
+            '.OBSIDIAN/PLUGINS /evil/main.js',
+            '.obsidian/community-plugins.json.',
+        ]) {
+            assert.equal(shared.isExcludedWithAncestors(path), true, path);
+        }
+        assert.equal(shared.isExcluded('.obsidian/app.json'), false);
+    });
+
+    it('matches the user’s own patterns exactly as written', () => {
+        const filter = new PathFilter(['Private/'], true, '.obsidian');
+        assert.equal(filter.isExcluded('Private/a.md'), true);
+        assert.equal(filter.isExcluded('private/a.md'), false);
+    });
+});
 
 describe('PathFilter — built-in exclusions', () => {
     const filter = new PathFilter([], true, '.obsidian');

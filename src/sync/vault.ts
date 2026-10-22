@@ -4,7 +4,7 @@ import { sha1Hex } from '../util/hash';
 import type { Logger } from '../util/logger';
 import type { UploadSource } from './drive';
 import { mediaTypeOf } from './media';
-import { ancestorPaths, basename, joinPath, parentPath } from './paths';
+import { ancestorPaths, basename, joinPath, parentPath, staysInVault } from './paths';
 import { imageThumbnails } from './thumbnails';
 import type { LocalState, SyncBase } from './types';
 
@@ -103,6 +103,19 @@ export class VaultIO {
         this.adapter = app.vault.adapter;
     }
 
+    /**
+     * Refuse a path that would lead outside the vault, before anything
+     * touches the disk with it. Names from Drive are checked where they are
+     * read (see `isSafeName`); this is the last line, for every path the sync
+     * reads or writes, whatever it came from.
+     */
+    private checked(path: string): string {
+        if (!staysInVault(path, Platform.isWin)) {
+            throw new Error(`Refusing ${JSON.stringify(path)}: it would lead outside the vault`);
+        }
+        return path;
+    }
+
     /** The file or folder at `path` as Obsidian indexes it, or null for a path it does not index. */
     private indexed(path: string): TAbstractFile | null {
         return this.app.vault.getAbstractFileByPath?.(path) ?? null;
@@ -132,7 +145,7 @@ export class VaultIO {
      */
     async removeLegacyPartialDownloads(files: string[]): Promise<void> {
         for (const path of files) {
-            if (/^\.[^/]*\.proton-sync\.tmp$/.test(basename(path))) {
+            if (/^\.[^/]*\.proton-sync\.tmp$/.test(basename(path)) && staysInVault(path, Platform.isWin)) {
                 try {
                     await this.adapter.remove(path);
                     this.logger.info(`Removed "${path}", a download left unfinished by an older version`);
@@ -160,7 +173,7 @@ export class VaultIO {
     ): Promise<{ files: string[]; folders: string[] }> {
         const files: string[] = [];
         const folders: string[] = [];
-        const queue = [from];
+        const queue = [this.checked(from)];
 
         while (queue.length > 0) {
             const folder = queue.pop()!;
@@ -184,7 +197,7 @@ export class VaultIO {
     }
 
     async exists(path: string): Promise<boolean> {
-        return this.adapter.exists(path);
+        return this.adapter.exists(this.checked(path));
     }
 
     /**
@@ -195,7 +208,7 @@ export class VaultIO {
      * the other is legitimate; the parent listing tells the two apart.
      */
     async existsExactly(path: string): Promise<boolean> {
-        const parent = parentPath(path);
+        const parent = parentPath(this.checked(path));
         if (parent !== '' && !(await this.adapter.exists(parent))) {
             return false;
         }
@@ -205,13 +218,13 @@ export class VaultIO {
 
     /** Size and mtime, without reading the content. Undefined for a missing path or a folder. */
     async stat(path: string): Promise<{ size: number; mtime: number } | undefined> {
-        const stat = await this.adapter.stat(path);
+        const stat = await this.adapter.stat(this.checked(path));
         return stat && stat.type === 'file' ? { size: stat.size, mtime: stat.mtime } : undefined;
     }
 
     /** Whether a folder holds any file at all, however deep. Empty subfolders do not count. */
     async hasFiles(path: string): Promise<boolean> {
-        const listing = await this.adapter.list(path);
+        const listing = await this.adapter.list(this.checked(path));
         if (listing.files.length > 0) {
             return true;
         }
@@ -225,6 +238,8 @@ export class VaultIO {
 
     /** Copy a file within the vault, without reading it into memory. */
     async copy(fromPath: string, toPath: string): Promise<void> {
+        this.checked(fromPath);
+        this.checked(toPath);
         this.holdSelfWrite(toPath);
         try {
             await this.ensureFolder(parentPath(toPath));
@@ -251,7 +266,7 @@ export class VaultIO {
         path: string,
         knownBase?: Pick<SyncBase, 'hash' | 'size' | 'localMtime'>,
     ): Promise<LocalState | undefined> {
-        const stat = await this.adapter.stat(path);
+        const stat = await this.adapter.stat(this.checked(path));
         if (!stat || stat.type !== 'file') {
             return undefined;
         }
@@ -279,7 +294,7 @@ export class VaultIO {
      * record.
      */
     async openUpload(path: string): Promise<{ source: UploadSource; local: LocalState }> {
-        const stat = await this.adapter.stat(path);
+        const stat = await this.adapter.stat(this.checked(path));
         if (!stat || stat.type !== 'file') {
             throw new Error(`"${path}" no longer exists`);
         }
@@ -337,7 +352,7 @@ export class VaultIO {
      * in which case the caller downloads into memory instead.
      */
     async openDownload(path: string): Promise<FileSink | null> {
-        const target = this.fullPath(path);
+        const target = this.fullPath(this.checked(path));
         const tempPath =
             this.downloadsDir === null
                 ? joinPath(parentPath(path), `.${basename(path)}.proton-sync.tmp`)
@@ -411,6 +426,8 @@ export class VaultIO {
      * conflict on each linking note.
      */
     async rename(fromPath: string, toPath: string): Promise<void> {
+        this.checked(fromPath);
+        this.checked(toPath);
         this.holdSelfWrite(fromPath);
         this.holdSelfWrite(toPath);
         try {
@@ -429,7 +446,7 @@ export class VaultIO {
     }
 
     async readText(path: string): Promise<string> {
-        return this.adapter.read(path);
+        return this.adapter.read(this.checked(path));
     }
 
     /**
@@ -441,6 +458,7 @@ export class VaultIO {
      * file actually has or its next scan will see a spurious local change.
      */
     async writeBinary(path: string, data: ArrayBuffer, mtime?: number): Promise<LocalState> {
+        this.checked(path);
         this.holdSelfWrite(path);
         try {
             await this.ensureFolder(parentPath(path));
@@ -482,7 +500,7 @@ export class VaultIO {
     }
 
     async ensureFolder(path: string): Promise<void> {
-        if (path === '') {
+        if (this.checked(path) === '') {
             return;
         }
         for (const folder of [...ancestorPaths(path), path]) {
@@ -509,6 +527,7 @@ export class VaultIO {
      * only when neither is available.
      */
     async trash(path: string): Promise<void> {
+        this.checked(path);
         this.holdSelfWrite(path);
         try {
             // Where Obsidian indexes it, the way the user chose in Files and
