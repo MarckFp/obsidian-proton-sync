@@ -485,7 +485,9 @@ export class SyncEngine {
 
     /** Queue a full reconciliation of both sides. */
     async syncNow(): Promise<void> {
-        return this.enqueue(() => this.fullSync());
+        return this.enqueue(async () => {
+            await this.fullSync();
+        });
     }
 
     /** Re-examine one path now. */
@@ -602,17 +604,21 @@ export class SyncEngine {
 
     // -- the two sync passes ---------------------------------------------
 
-    private async fullSync(): Promise<void> {
+    /**
+     * Compare the whole vault with the whole Drive folder. Resolves whether it
+     * got to the end: false when it failed, was stopped, or could not start.
+     */
+    private async fullSync(): Promise<boolean> {
         const drive = this.drive;
         const rootUid = this.rootUid;
         if (!drive || !rootUid) {
             this.setStatus('not-configured');
-            return;
+            return false;
         }
         if (this.networkHeld()) {
             this.deferredFullSync = true;
             this.setStatus('waiting-for-wifi');
-            return;
+            return false;
         }
         this.deferredFullSync = false;
 
@@ -718,8 +724,10 @@ export class SyncEngine {
             this.lastSyncedAt = Date.now();
             this.lastError = null;
             this.setStatus('idle');
+            return true;
         } catch (error) {
             this.reportFailure('Full sync failed', error);
+            return false;
         } finally {
             this.adoptingSettings = null;
             await this.state.flush();
@@ -755,7 +763,8 @@ export class SyncEngine {
             lastFull === null ||
             Date.now() - lastFull > STARTUP_WALK_AFTER_MS
         ) {
-            return this.fullSync();
+            await this.fullSync();
+            return;
         }
 
         let scopeId: string;
@@ -763,15 +772,18 @@ export class SyncEngine {
             scopeId = (await drive.getNode(rootUid)).treeEventScopeId;
         } catch {
             // Let the full sync report it, and set the status to match.
-            return this.fullSync();
+            await this.fullSync();
+            return;
         }
         if (this.state.getEventCursor(scopeId) === null) {
-            return this.fullSync();
+            await this.fullSync();
+            return;
         }
 
         const scan = await this.scanLocalChanges();
         if (scan === null) {
-            return this.fullSync();
+            await this.fullSync();
+            return;
         }
         this.logger.info(`Catching up from the last session: ${scan.size} local change(s), then Drive's events`);
         this.treeEventScopeId = scopeId;
@@ -1504,6 +1516,21 @@ export class SyncEngine {
                 return;
 
             case 'take-merged': {
+                // The merge read the note a while ago, before two downloads.
+                // Typing saved since would be lost under it: decide again.
+                if (await this.localMoved(path, local)) {
+                    throw new LocalChangedError(path);
+                }
+                // Open in an editor, the merge goes in as an edit, so it does
+                // not race Obsidian's own save; with unsaved typing in the
+                // editor, nothing is written until that is saved.
+                const editor = this.environment.openEditor?.(path) ?? null;
+                if (editor) {
+                    if (editor.text() !== (await this.vault.readText(path))) {
+                        throw new EditorBusyError(path, false);
+                    }
+                    editor.replace(new TextDecoder().decode(resolution.content));
+                }
                 await this.vault.writeBinary(path, resolution.content);
                 await this.upload(path, remote);
                 this.state.clearConflict(path);
@@ -2327,19 +2354,18 @@ export class SyncEngine {
             readError = error;
         }
 
-        if (needsFullSync) {
-            await this.fullSync();
-        } else {
-            await this.applyRemoteEvents(events);
-        }
+        // A full sync asked for by Drive, or a change that could not be looked
+        // up, is not settled until it has run: the cursor stays where it was,
+        // so the next poll reads the same events again, even after a restart.
+        const settled = needsFullSync ? await this.fullSync() : await this.applyRemoteEvents(events);
         // Only now: a cursor saved before its events were handled would skip
         // them for good if the app closed in between.
-        if (lastEventId !== null) {
+        if (lastEventId !== null && settled) {
             this.state.setEventCursor(scopeId, lastEventId);
         }
         if (readError !== null) {
             this.reportFailure('Could not read Drive events', readError);
-        } else if (this.status === 'idle') {
+        } else if (this.status === 'idle' && settled) {
             // Drive was checked and all it had is in: synced as of now, even
             // when nothing changed. Without this a quiet vault would read as
             // not synced for hours, however often Drive is checked.
@@ -2349,10 +2375,15 @@ export class SyncEngine {
         await this.state.flush();
     }
 
-    private async applyRemoteEvents(changes: NodeChange[]): Promise<void> {
+    /**
+     * Sync what a batch of Drive events changed. Resolves false when a change
+     * could not be looked up, so that the batch is read again on the next poll.
+     */
+    private async applyRemoteEvents(changes: NodeChange[]): Promise<boolean> {
         const paths = new Set(this.state.dueRetries());
         const confirmedAbsent = new Set<string>();
         const goneFolders: string[] = [];
+        let settled = true;
 
         // The device list's files are not the vault's: passed on, not synced.
         const events = changes.filter((event) => !(this.devices?.takeChange(event) ?? false));
@@ -2377,6 +2408,10 @@ export class SyncEngine {
                 continue;
             }
             const path = await this.pathForEvent(event);
+            if (path === undefined) {
+                settled = false;
+                continue;
+            }
             if (path !== null && path !== '' && !this.filter.isExcludedWithAncestors(path)) {
                 paths.add(path);
             }
@@ -2390,6 +2425,7 @@ export class SyncEngine {
         for (const path of goneFolders.sort((a, b) => byDepth(b, a))) {
             await this.removeLocalFolderIfEmpty(path);
         }
+        return settled;
     }
 
     /** React to an event on a recorded folder: follow a rename, or take in a deletion. */
@@ -2453,7 +2489,12 @@ export class SyncEngine {
      * synced one is recorded as soon as it is seen, so that the events for
      * its contents, which come after it, are recognised in turn.
      */
-    private async pathForEvent(event: NodeChange): Promise<string | null> {
+    /**
+     * The vault path an event is about: null when there is nothing to
+     * reconcile, and undefined when Drive could not be asked, which is not the
+     * same as being told the node is gone.
+     */
+    private async pathForEvent(event: NodeChange): Promise<string | null | undefined> {
         const known = this.state.getByNodeUid(event.nodeUid);
         if (known) {
             return known.path;
@@ -2462,7 +2503,11 @@ export class SyncEngine {
             return null;
         }
         const location = await this.tryLocate(event.nodeUid);
-        if (location?.kind !== 'at' || location.path === '') {
+        if (location === null) {
+            this.logger.warn('Could not look up a change on Drive; trying again on the next check');
+            return undefined;
+        }
+        if (location.kind !== 'at' || location.path === '') {
             // Deleted before we asked, or outside the synced folder. Either
             // way there is nothing to reconcile.
             return null;

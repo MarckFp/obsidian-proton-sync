@@ -1317,6 +1317,82 @@ describe('SyncEngine — going through Obsidian’s Vault API (issue #6)', () =>
     });
 });
 
+describe('SyncEngine — changes from Drive that could not be settled the first time', () => {
+    it('reads a refresh again when the full sync it asked for fails', async () => {
+        const { vault, drive, engine, state, settled } = await setup();
+        await settled();
+        const cursor = state.getEventCursor('scope');
+
+        drive.put('missed.md', 'only a full sync finds this');
+        drive.emit(drive.nodes.get(SYNC_ROOT)!, DriveEventType.TreeRefresh);
+        drive.failLookups = true;
+        engine.pollNow();
+        await settled();
+        assert.equal(vault.read('missed.md'), undefined, 'the full sync failed');
+        assert.equal(state.getEventCursor('scope'), cursor, 'not past the refresh');
+
+        drive.failLookups = false;
+        engine.pollNow();
+        await settled();
+        assert.equal(vault.read('missed.md'), 'only a full sync finds this');
+        assert.notEqual(state.getEventCursor('scope'), cursor);
+    });
+
+    it('looks up a new file again when looking it up failed', async () => {
+        const { vault, drive, engine, settled } = await setup();
+        await settled();
+
+        drive.emit(drive.put('new.md', 'from the phone'), DriveEventType.NodeCreated);
+        drive.failLookups = true;
+        engine.pollNow();
+        await settled();
+        assert.equal(vault.read('new.md'), undefined);
+
+        drive.failLookups = false;
+        engine.pollNow();
+        await settled();
+        assert.equal(vault.read('new.md'), 'from the phone');
+    });
+
+    /** A note edited here and on another device, for the merge policy, open in an editor showing `shown`. */
+    async function mergeWithEditorOpen(shown: string) {
+        const vault = new MemoryVault();
+        vault.write('note.md', 'one\ntwo\nthree');
+        const editor = {
+            content: shown,
+            text: () => editor.content,
+            replace: (next: string) => {
+                editor.content = next;
+            },
+        };
+        let open = false;
+        const { drive, engine, settled } = await setup({
+            vault,
+            settings: { conflictPolicy: 'merge' },
+            environment: { isMobile: false, isMetered: () => false, openEditor: () => (open ? editor : null) },
+        });
+        await settled();
+        vault.write('note.md', 'ONE\ntwo\nthree');
+        drive.put('note.md', 'one\ntwo\nTHREE');
+        open = true;
+        await engine.syncNow();
+        await settled();
+        return { vault, editor };
+    }
+
+    it('puts a merge into the open editor, rather than writing the file under it', async () => {
+        const { vault, editor } = await mergeWithEditorOpen('ONE\ntwo\nthree');
+        assert.equal(editor.content, 'ONE\ntwo\nTHREE');
+        assert.equal(vault.read('note.md'), 'ONE\ntwo\nTHREE');
+    });
+
+    it('writes no merge under typing the open editor has not saved yet', async () => {
+        const { vault, editor } = await mergeWithEditorOpen('ONE\ntwo\nthree\nfour, not saved yet');
+        assert.equal(vault.read('note.md'), 'ONE\ntwo\nthree', 'decided again once Obsidian saves');
+        assert.equal(editor.content, 'ONE\ntwo\nthree\nfour, not saved yet');
+    });
+});
+
 describe('SyncEngine — checking Drive just before uploading', () => {
     it('merges an edit another device uploaded after the decision, instead of uploading over it', async () => {
         const vault = new MemoryVault();
