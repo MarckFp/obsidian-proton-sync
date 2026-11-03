@@ -78,6 +78,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
             this.mobileGroup(),
             this.advancedGroup(),
             this.logGroup(),
+            this.securityGroup(),
         ];
     }
 
@@ -540,6 +541,68 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                                     new Notice('Proton Drive Sync: sync state rebuilt.');
                                 }),
                         );
+                    },
+                },
+            ],
+        };
+    }
+
+
+    /**
+     * What is installed beside this plugin.
+     *
+     * Every plugin in a vault can read the vault and this plugin's sign-in, so
+     * the set of plugins is part of the security model. This shows what was
+     * seen at the last start and what changed since the one before; the scan
+     * compares a hash of each `main.js`, not only the version a plugin claims.
+     */
+    private securityGroup(): SettingDefinitionItem {
+        return {
+            type: 'group',
+            heading: 'Security',
+            items: [
+                {
+                    name: 'Watch the other plugins in this vault',
+                    desc:
+                        'At each start, compare the installed plugins with the set seen last time and say when one ' +
+                        'is added, updated or removed. A change to code that can read this vault is worth knowing about.',
+                    render: (setting) =>
+                        setting.addToggle((toggle) =>
+                            toggle.setValue(this.plugin.settings.watchOtherPlugins).onChange(async (value) => {
+                                this.plugin.settings.watchOtherPlugins = value;
+                                await this.plugin.saveSettings();
+                                if (value) {
+                                    void this.plugin.scanOtherPlugins();
+                                }
+                                this.update();
+                            }),
+                        ),
+                },
+                {
+                    name: 'Plugins seen at the last start',
+                    desc: 'Rescan now, or read the list and what changed since the previous start.',
+                    render: (setting) => {
+                        setting.addButton((button) =>
+                            button.setButtonText('Rescan').onClick(() => void this.plugin.scanOtherPlugins()),
+                        );
+                        const report = getRuntime().pluginWatch;
+                        const box = setting.settingEl.createDiv({ cls: 'proton-drive-sync-plugin-watch' });
+                        if (!report) {
+                            box.setText('Nothing scanned yet.');
+                            return;
+                        }
+                        const head = report.baseline
+                            ? `${report.plugins.length} plugin(s) recorded as the starting point.`
+                            : `${report.plugins.length} plugin(s); ${report.changes.length} change(s) since the last start.`;
+                        box.createEl('p', { text: head });
+                        for (const change of report.changes) {
+                            const line = change.kind === 'added' ? 'new' : change.kind === 'removed' ? 'removed' : 'changed';
+                            box.createEl('p', { text: `• ${change.name} — ${line} (${change.detail})` });
+                        }
+                        for (const plugin of report.plugins) {
+                            const tag = plugin.digest ? plugin.digest.slice(0, 8) : 'unreadable';
+                            box.createEl('p', { text: `• ${plugin.name} ${plugin.version} — ${tag}` });
+                        }
                     },
                 },
             ],

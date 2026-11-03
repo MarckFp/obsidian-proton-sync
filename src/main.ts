@@ -4,6 +4,7 @@
 import './polyfills';
 
 import { getRuntime } from './runtime';
+import { watchPlugins } from './security/pluginWatch';
 import {
     apiVersion,
     type App,
@@ -147,6 +148,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         await this.loadSettings();
 
         runtime.logger = new Logger(this.settings.logLevel);
+        // After the workspace is ready, so the first start of the day does not
+        // delay anything the user is waiting for.
         setLogShowsNames(this.settings.logShowsNames ?? false);
         this.statusBar = new StatusBar(this.addStatusBarItem(), {
             syncNow: () => void this.syncNowOrSetUp(),
@@ -287,6 +290,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.summary = { ...runtime.engine.getSummary(), status: 'connecting' };
         this.settingsTab = new ProtonDriveSyncSettingsTab(this.app, this);
         this.addSettingTab(this.settingsTab);
+        window.setTimeout(() => void this.scanOtherPlugins(), 4000);
         this.registerCommands();
         this.registerVaultEvents();
         this.registerLifecycleEvents();
@@ -587,6 +591,40 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     /** Everything this device logged recently, with enough context to go in a bug report. */
+
+    /**
+     * Compare the plugins installed in this vault with the set seen last time.
+     *
+     * Every plugin in a vault can read the vault and this plugin's sign-in, so a
+     * new or updated one is a security event. This cannot stop the code — it is
+     * the same process — but it makes the change visible instead of silent.
+     */
+    async scanOtherPlugins(): Promise<void> {
+        if (!this.settings.watchOtherPlugins) {
+            return;
+        }
+        try {
+            const report = await watchPlugins(this.app, this.manifest.id, this.pluginDir());
+            runtime.pluginWatch = report;
+            const notable = report.changes.filter((change) => change.kind !== 'removed');
+            if (notable.length === 0) {
+                return;
+            }
+            const listed = notable
+                .slice(0, 3)
+                .map((change) => `${change.name} (${change.kind === 'added' ? 'new' : change.detail})`)
+                .join(', ');
+            const more = notable.length > 3 ? ` and ${notable.length - 3} more` : '';
+            new Notice(
+                `Proton Drive Sync: ${listed}${more} changed since the last start. ` +
+                    'Any plugin here can read this vault and the Proton sign-in — check Settings → Community plugins.',
+                15000,
+            );
+        } catch (error) {
+            runtime.logger.warn('Could not scan the other plugins in this vault', error);
+        }
+    }
+
     async copyLog(): Promise<void> {
         const header = [
             `Proton Drive Sync ${this.manifest.version}`,

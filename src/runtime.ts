@@ -11,6 +11,7 @@
  * the same process can still read the vault and the network stack.
  */
 import type { ConflictEvent } from './sync/engine/types';
+import type { PluginWatchReport } from './security/pluginWatch';
 import type { ConflictHistory } from './sync/conflictHistory';
 import type { DeviceList } from './sync/devices';
 import type { SyncEngine } from './sync/engine';
@@ -29,6 +30,8 @@ const runtime = {
     clientUid: "",
     logger: null as unknown as Logger,
     pendingConflicts: [] as ConflictEvent[],
+    /** The last scan of the plugins installed alongside this one; see security/pluginWatch.ts. */
+    pluginWatch: null as PluginWatchReport | null,
 };
 
 /** The live runtime. Throws nothing: every field is wired during `onload`. */
