@@ -1892,6 +1892,81 @@ describe('SyncEngine — names Windows cannot store', () => {
     });
 });
 
+describe('SyncEngine — names the vault spells differently (issue #27)', () => {
+    // "Café.md" as macOS and some Linux tools write it, with the accent as a
+    // character of its own (NFD), and as Obsidian spells it (NFC).
+    const DECOMPOSED = 'Café.md';
+    const COMPOSED = 'Café.md';
+    const SENSITIVE: EngineEnvironment = { isMobile: false, isMetered: () => false, caseInsensitive: false };
+
+    it('renames one on Drive to the vault’s spelling, rather than uploading a twin', async () => {
+        const drive = new FakeDrive();
+        const node = drive.put(DECOMPOSED, 'menu');
+        const { vault, settled } = await setup({ drive, environment: SENSITIVE });
+        await settled();
+
+        assert.equal(vault.read(COMPOSED), 'menu');
+        assert.deepEqual(drive.notePaths(), [COMPOSED]);
+        assert.equal(drive.at(COMPOSED)!.uid, node.uid, 'the same file, renamed');
+    });
+
+    it('does the same for a folder, and a name with a non-breaking space', async () => {
+        const drive = new FakeDrive();
+        drive.put('Réunions/Meeting notes.md', 'agenda');
+        const { vault, settled } = await setup({ drive, environment: SENSITIVE });
+        await settled();
+
+        assert.equal(vault.read('Réunions/Meeting notes.md'), 'agenda');
+        assert.deepEqual(drive.notePaths(), ['Réunions/Meeting notes.md']);
+    });
+
+    it('keeps both, and says so, where a twin under the vault’s spelling is already on Drive', async () => {
+        const drive = new FakeDrive();
+        drive.put(DECOMPOSED, 'old menu');
+        drive.put(COMPOSED, 'new menu');
+        const { vault, conflicts, settled } = await setup({ drive, environment: SENSITIVE });
+        await settled();
+
+        assert.equal(vault.read(COMPOSED), 'new menu');
+        assert.equal(vault.read('Café (name conflict).md'), 'old menu');
+        assert.deepEqual(drive.notePaths(), ['Café (name conflict).md', COMPOSED]);
+        assert.deepEqual(
+            conflicts.map((event) => [event.path, event.reason, event.outcome]),
+            [[DECOMPOSED, 'name-spelling', 'renamed']],
+        );
+    });
+
+    it('forgets the records a twin left behind, without touching the note in the vault', async () => {
+        const drive = new FakeDrive();
+        const vault = new MemoryVault();
+        const original = drive.put(DECOMPOSED, 'menu');
+        const twin = drive.put(COMPOSED, 'menu');
+        vault.write(COMPOSED, 'menu');
+        const first = await setup({ drive, vault, environment: SENSITIVE, start: false });
+        first.state.setSynced(DECOMPOSED, original.uid, 'file');
+        first.state.setSynced(COMPOSED, twin.uid, 'file');
+        await first.engine.start(drive.client() as unknown as ProtonDriveClient, SYNC_ROOT);
+        await first.settled();
+
+        assert.equal(vault.read(COMPOSED), 'menu');
+        assert.equal(first.state.get(DECOMPOSED), undefined);
+        assert.equal(first.state.get(COMPOSED)?.nodeUid, twin.uid);
+        assert.deepEqual(drive.notePaths(), ['Café (name conflict).md', COMPOSED]);
+    });
+
+    it('renames one that arrives from another device while syncing, wherever letter case counts', async () => {
+        const { vault, drive, engine, settled } = await setup({ environment: SENSITIVE });
+        await settled();
+
+        drive.emit(drive.put(DECOMPOSED, 'menu'), DriveEventType.NodeCreated);
+        engine.pollNow();
+        await settled();
+
+        assert.equal(vault.read(COMPOSED), 'menu');
+        assert.deepEqual(drive.notePaths(), [COMPOSED]);
+    });
+});
+
 describe('SyncEngine — the device list', () => {
     const RECORD = `${DEVICES_FOLDER}/device-laptop.json`;
 

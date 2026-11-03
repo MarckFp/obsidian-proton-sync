@@ -434,6 +434,14 @@ devices never need to be online together. What to expect when they are:
   name all of them can store. A vault no Windows device syncs keeps its names.
   If the rename fails, the file is not synced on that Windows device, and
   **Not synced yet** says why.
+- **Names spelled with other Unicode characters** than Obsidian uses, such as
+  `Café.md` with its accent stored as a separate character (as macOS and some
+  Linux tools write it), or a name with a non-breaking space, are renamed on
+  Drive to the spelling Obsidian uses, on every device. Without that, the vault
+  would hold the note under one spelling and Drive under the other, and the two
+  would sync as different files. If a file with that spelling is already on
+  Drive, the other is renamed to `Café (name conflict).md` instead, so both are
+  kept, and the rename shows up in the conflict notice and history.
 - **On Windows, a file open in another program** (a video in a player, say) may
   be locked, and an update to it waits until the next sync after it is closed.
 

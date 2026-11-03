@@ -3,12 +3,14 @@ import type { DriveIO, RemoteTree } from '../drive';
 import {
     ancestorPaths,
     basename,
+    isWithin,
     joinPath,
     needsWindowsName,
     parentPath,
     PathFilter,
     replacePrefix,
     splitExtension,
+    vaultSpelling,
     windowsName,
 } from '../paths';
 import type { SyncState } from '../state';
@@ -168,6 +170,7 @@ export class CaseClashes {
      * so a folder renamed this way takes its files along.
      */
     async settleTree(tree: RemoteTree, local: { files: string[]; folders: string[] }): Promise<void> {
+        await this.settleSpellings(tree, local);
         await this.settleWindowsNames(tree, local);
         if (!(await this.isCaseInsensitive())) {
             return;
@@ -198,6 +201,36 @@ export class CaseClashes {
     }
 
     /**
+     * On every device, rename on Drive every name in the tree not spelled as
+     * the vault spells names (see `vaultSpelling`), folders first so their
+     * files move with them. A sync record under the old spelling is forgotten
+     * first: the vault only has the other spelling, which may be another file
+     * altogether, and following the rename would move that one.
+     */
+    private async settleSpellings(tree: RemoteTree, local: { files: string[]; folders: string[] }): Promise<void> {
+        const taken = this.claimants([...local.folders, ...local.files, ...tree.folders.keys(), ...tree.files.keys()]);
+        const moved: [from: string, to: string][] = [];
+        for (const listed of [...tree.folders.keys(), ...tree.files.keys()].sort(byDepth)) {
+            // Where it is now, if a folder above it was renamed earlier in this loop.
+            const path = moved.reduce((current, [from, to]) => (isWithin(current, from) ? replacePrefix(current, from, to) : current), listed);
+            const isFolder = tree.folders.has(path);
+            const uid = tree.folders.get(path) ?? tree.files.get(path)?.nodeUid;
+            const name = basename(path);
+            if (uid === undefined || vaultSpelling(name) === name || this.host.filter().isExcludedWithAncestors(path)) {
+                continue;
+            }
+            for (const record of this.host.state.entries().filter((entry) => isWithin(entry.path, path))) {
+                this.host.state.delete(record.path);
+            }
+            const renamed = await this.renameForSpelling(uid, path, isFolder, taken);
+            if (renamed !== null) {
+                renameInTree(tree, path, renamed);
+                moved.push([path, renamed]);
+            }
+        }
+    }
+
+    /**
      * On Windows, rename on Drive every name in the tree that Windows cannot
      * store, folders first so their files move with them. Every device then
      * syncs it under the new name, which all of them can store.
@@ -223,11 +256,12 @@ export class CaseClashes {
     /**
      * The same, for paths arriving one at a time from Drive's events: a path
      * with no record whose name, or any folder above it, clashes with a
-     * recorded one is renamed on Drive first, and the pass goes on with its new
-     * name.
+     * recorded one, or that the vault would spell differently, is renamed on
+     * Drive first, and the pass goes on with its new name.
      */
     async settleIn(paths: Set<string>): Promise<Set<string>> {
         const claimants = this.claimants([]);
+        const foldsCase = await this.isCaseInsensitive();
         const settled = new Set<string>();
         for (const path of paths) {
             if (this.host.state.get(path)) {
@@ -240,10 +274,17 @@ export class CaseClashes {
                 this.host.logger.warn(`Not syncing "${resolved}": Windows cannot store its name, and it could not be renamed on Drive`);
                 continue;
             }
-            const clash = [...ancestorPaths(resolved), resolved].find((prefix) => {
-                const owner = claimants.get(prefix.toLowerCase());
-                return owner !== undefined && owner !== prefix;
-            });
+            if (resolved.split('/').some((name) => vaultSpelling(name) !== name)) {
+                // Could not be renamed: written here, it would land under the vault's spelling as a second file.
+                this.host.logger.warn(`Not syncing "${resolved}": the vault spells its name differently, and it could not be renamed on Drive`);
+                continue;
+            }
+            const clash = !foldsCase
+                ? undefined
+                : [...ancestorPaths(resolved), resolved].find((prefix) => {
+                      const owner = claimants.get(prefix.toLowerCase());
+                      return owner !== undefined && owner !== prefix;
+                  });
             if (clash === undefined) {
                 settled.add(resolved);
                 continue;
@@ -264,10 +305,12 @@ export class CaseClashes {
     /** `path`, or where it lives after the part of it that clashes was renamed on Drive. */
     async resolve(path: string, claimants: Map<string, string>): Promise<string> {
         const prefixes = [...ancestorPaths(path), path];
+        const foldsCase = await this.isCaseInsensitive();
         for (const [index, prefix] of prefixes.entries()) {
             const owner = claimants.get(prefix.toLowerCase());
-            const clashes = owner !== undefined && owner !== prefix;
-            if (!clashes && !(this.host.environment.windows === true && windowsName(basename(prefix)) !== null)) {
+            const clashes = foldsCase && owner !== undefined && owner !== prefix;
+            const misspelled = vaultSpelling(basename(prefix)) !== basename(prefix);
+            if (!clashes && !misspelled && !(this.host.environment.windows === true && windowsName(basename(prefix)) !== null)) {
                 continue;
             }
             const isFolder = index < prefixes.length - 1;
@@ -283,10 +326,13 @@ export class CaseClashes {
                 // Not on Drive, so not this device's to rename.
                 return path;
             }
-            const renamed = clashes
-                ? await this.renameForCase(uid, prefix, owner, isFolder, claimants)
-                : await this.renameForWindows(uid, prefix, claimants);
-            return renamed === null ? path : replacePrefix(path, prefix, renamed);
+            const renamed = misspelled
+                ? await this.renameForSpelling(uid, prefix, isFolder, claimants)
+                : clashes
+                  ? await this.renameForCase(uid, prefix, owner, isFolder, claimants)
+                  : await this.renameForWindows(uid, prefix, claimants);
+            // A folder renamed, the rest of the path may still need settling.
+            return renamed === null ? path : this.resolve(replacePrefix(path, prefix, renamed), claimants);
         }
         return path;
     }
@@ -317,6 +363,37 @@ export class CaseClashes {
                     `renamed "${path}" to "${target}" on Drive`,
             );
             this.host.reportConflict({ path: owner, reason: 'case-collision', outcome: 'renamed', copyPath: target });
+        }
+        return target;
+    }
+
+    /**
+     * Rename a node on Drive to its vault spelling; see `vaultSpelling`. When
+     * another file already has that name, as a twin uploaded under the vault's
+     * spelling would, it becomes "<name> (name conflict)" instead, so neither
+     * is lost. Returns the new path, or null if it could not be renamed.
+     */
+    private async renameForSpelling(
+        nodeUid: string,
+        path: string,
+        isFolder: boolean,
+        claimants: Map<string, string>,
+    ): Promise<string | null> {
+        const spelled = vaultSpelling(basename(path));
+        const { stem, extension } = isFolder ? { stem: spelled, extension: '' } : splitExtension(spelled);
+        const target = await this.renameOnDrive(
+            nodeUid,
+            path,
+            (n) => (n === 1 ? spelled : `${stem} (name conflict${n === 2 ? '' : ` ${n - 1}`})${extension}`),
+            claimants,
+            'spell it as the vault does',
+        );
+        if (target !== null && basename(target) !== spelled) {
+            this.host.logger.warn(
+                `"${path}" has the same name as "${joinPath(parentPath(path), spelled)}" apart from how it is spelled ` +
+                    `in Unicode; renamed it to "${target}" on Drive`,
+            );
+            this.host.reportConflict({ path, reason: 'name-spelling', outcome: 'renamed', copyPath: target });
         }
         return target;
     }

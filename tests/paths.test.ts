@@ -16,8 +16,17 @@ import {
     splitExtension,
     staysInVault,
     needsWindowsName,
+    vaultSpelling,
     windowsName,
 } from '../src/sync/paths';
+
+describe('vaultSpelling', () => {
+    it('spells names as Obsidian does, in NFC with plain spaces', () => {
+        assert.equal(vaultSpelling('Café.md'), 'Café.md');
+        assert.equal(vaultSpelling('Meeting notes .md'), 'Meeting notes .md');
+        assert.equal(vaultSpelling('Café.md'), 'Café.md');
+    });
+});
 
 describe('windowsName', () => {
     it('leaves names Windows can store alone', () => {

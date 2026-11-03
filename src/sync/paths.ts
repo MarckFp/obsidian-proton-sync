@@ -95,6 +95,20 @@ export function replacePrefix(path: string, fromFolder: string, toFolder: string
     return path === fromFolder ? toFolder : `${toFolder}${path.slice(fromFolder.length)}`;
 }
 
+/**
+ * A name as Obsidian spells it in the vault: Unicode NFC, with non-breaking
+ * spaces made plain, as its `normalizePath` does.
+ *
+ * Drive keeps names byte for byte, so the same title can be stored there
+ * decomposed (NFD, as macOS hands names out) or with a non-breaking space.
+ * The vault can only hold Obsidian's spelling, so a Drive name spelled
+ * otherwise would never match its own file, and the sync would upload a twin.
+ * Such a node is renamed on Drive to this spelling, which looks the same.
+ */
+export function vaultSpelling(name: string): string {
+    return name.normalize('NFC').replace(/[\u00A0\u202F]/g, ' ');
+}
+
 /** Device names Windows reserves, with or without an extension: `aux.md` is not a file it can create. */
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 /**

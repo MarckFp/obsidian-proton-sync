@@ -10,6 +10,7 @@ export const REASON_TEXT: Record<ConflictReason, string> = {
     'deleted-locally-modified-remotely': 'deleted here but edited on another device',
     'case-collision': 'has the same name as another file apart from letter case, which this device cannot tell apart',
     'windows-name': 'has a name Windows cannot store',
+    'name-spelling': 'has the same name as another file, spelled with different Unicode characters',
 };
 
 /** How it was settled. */
