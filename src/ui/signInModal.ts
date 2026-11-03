@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Setting } from 'obsidian';
+import { App, Modal, Notice, Setting, setIcon } from 'obsidian';
 
 import type ProtonDriveSyncPlugin from '../main';
 
@@ -28,11 +28,12 @@ export class SignInModal extends Modal {
         contentEl.empty();
         contentEl.createEl('h2', { text: 'Sign in to Proton' });
 
-        const status = contentEl.createEl('p', {
-            text: 'Opening Proton in your browser…',
-        });
+        const row = contentEl.createDiv({ cls: 'proton-drive-sync-waiting' });
+        const spinner = row.createSpan({ cls: 'proton-drive-sync-icon proton-drive-sync-spin' });
+        setIcon(spinner, 'refresh-cw');
+        const status = row.createSpan({ text: 'Opening Proton in your browser…' });
 
-        void this.begin(contentEl, status);
+        void this.begin(contentEl, status, spinner);
     }
 
     override onClose(): void {
@@ -42,11 +43,14 @@ export class SignInModal extends Modal {
         }
     }
 
-    private async begin(contentEl: HTMLElement, status: HTMLElement): Promise<void> {
+    private async begin(contentEl: HTMLElement, status: HTMLElement, spinner: HTMLElement): Promise<void> {
         let handle;
         try {
-            handle = await this.plugin.session.beginWebSignIn(this.abortController.signal);
+            handle = await this.plugin.session.beginWebSignIn(this.abortController.signal, () =>
+                status.setText('Approved. Finishing sign-in…'),
+            );
         } catch (error) {
+            spinner.remove();
             status.setText(`Could not start sign-in: ${message(error)}`);
             return;
         }
@@ -87,6 +91,7 @@ export class SignInModal extends Modal {
             if (this.abortController.signal.aborted) {
                 return;
             }
+            spinner.remove();
             status.setText(`Sign-in failed: ${message(error)}`);
         }
     }

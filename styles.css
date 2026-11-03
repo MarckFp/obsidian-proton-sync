@@ -369,6 +369,21 @@ button.proton-drive-sync-diff-action.mod-added:hover {
     background-color: rgba(var(--color-green-rgb), 0.28);
 }
 
+/* Sign-in: a spinner beside what it is waiting for, which can run to a few
+   lines, so the spinner stays level with the first. */
+
+.proton-drive-sync-waiting {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--size-4-2);
+    margin-block: var(--size-4-3);
+}
+
+.proton-drive-sync-waiting .proton-drive-sync-icon {
+    flex: none;
+    margin-top: 0.15em;
+}
+
 /* PIN prompts */
 
 .proton-drive-sync-pin-error {

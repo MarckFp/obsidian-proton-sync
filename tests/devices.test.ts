@@ -129,6 +129,44 @@ describe('DeviceRegistry', () => {
         assert.deepEqual(await mine.request('me'), request('active', 101));
     });
 
+    it('finds its folder where it was last time, without listing the synced folder', async () => {
+        const drive = new FakeDrive();
+        await registryOn(drive).ask('me', request('paused', 100));
+        let saved: string | null = null;
+        const memory = { load: () => saved, save: (uid: string) => (saved = uid) };
+        const io = new DriveIO(drive.client() as unknown as ProtonDriveClient, SILENT);
+        assert.deepEqual(await new DeviceRegistry(io, SYNC_ROOT, SILENT, memory).request('me'), request('paused', 100));
+        assert.equal(saved, drive.at(DEVICES_FOLDER)!.uid);
+
+        const before = drive.listings;
+        assert.deepEqual(await new DeviceRegistry(io, SYNC_ROOT, SILENT, memory).request('me'), request('paused', 100));
+        assert.equal(drive.listings - before, 1, 'only the list’s own folder');
+    });
+
+    it('looks for its folder again when the one it remembers is gone', async () => {
+        const drive = new FakeDrive();
+        await registryOn(drive).ask('me', request('paused', 100));
+        const stale = drive.ensureFolderPath('Old devices');
+        for (const saved of [stale, 'no-such-node']) {
+            const memory = { load: () => saved, save: () => undefined };
+            const io = new DriveIO(drive.client() as unknown as ProtonDriveClient, SILENT);
+            assert.deepEqual(await new DeviceRegistry(io, SYNC_ROOT, SILENT, memory).request('me'), request('paused', 100), saved);
+        }
+    });
+
+    it('reads ahead with prepare, and leaves failures to the read that follows', async () => {
+        const drive = new FakeDrive();
+        await registryOn(drive).ask('me', request('paused', 100));
+        const registry = registryOn(drive);
+        await registry.prepare();
+        const before = drive.listings;
+        assert.deepEqual(await registry.request('me'), request('paused', 100));
+        assert.equal(drive.listings, before, 'listed already');
+
+        drive.failLookups = true;
+        await registryOn(drive).prepare();
+    });
+
     it('ignores a file it cannot read', async () => {
         const drive = new FakeDrive();
         drive.put(`${DEVICES_FOLDER}/request-me.json`, 'not a request');

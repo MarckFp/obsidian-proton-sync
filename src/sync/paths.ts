@@ -267,14 +267,17 @@ function globToRegExp(pattern: string): RegExp {
  *
  * The name is capped so that writing it cannot fail on the filesystem's own
  * limit — see {@link NAME_MAX_BYTES}. The suffix and the extension are what
- * makes the copy recognisable, so the stem is what gives way.
+ * makes the copy recognisable, so the stem is what gives way. The device
+ * name is kept whole when the note's name still fits beside it, and cut to
+ * {@link MAX_DEVICE_BYTES} only when it does not.
  */
 export function conflictCopyPath(path: string, deviceName: string, when: Date): string {
     const { stem, extension } = splitExtension(path);
     const stamp = formatConflictTimestamp(when);
-    const device = truncateToBytes(sanitiseForFilename(deviceName), MAX_DEVICE_BYTES);
-    const suffix = device ? `${stamp} from ${device}` : stamp;
-    const tail = ` (conflict ${suffix})${extension}`;
+    const tailFor = (device: string) => ` (conflict ${device ? `${stamp} from ${device}` : stamp})${extension}`;
+    const fullDevice = sanitiseForFilename(deviceName);
+    const fits = byteLength(basename(stem)) + byteLength(tailFor(fullDevice)) <= NAME_MAX_BYTES - DEDUPE_RESERVE_BYTES;
+    const tail = tailFor(fits ? fullDevice : truncateToBytes(fullDevice, MAX_DEVICE_BYTES));
     const room = NAME_MAX_BYTES - byteLength(tail) - DEDUPE_RESERVE_BYTES;
     const name = truncateToBytes(basename(stem), Math.max(room, MIN_STEM_BYTES));
     return joinPath(parentPath(stem), `${name}${tail}`);
@@ -291,7 +294,7 @@ export const NAME_MAX_BYTES = 255;
 /** Room left for the ` 2`, ` 3`… {@link SyncEngine} appends when a copy name is taken. */
 const DEDUPE_RESERVE_BYTES = 8;
 
-/** How much of the device name a copy keeps when the note's own name leaves little room. */
+/** How much of the device name a copy keeps when the note's own name leaves too little room for all of it. */
 const MAX_DEVICE_BYTES = 32;
 
 /** Never shorten a stem to nothing, even when the device name alone nearly fills the name. */
@@ -356,6 +359,37 @@ export function conflictCopyOriginal(path: string): string | null {
         return null;
     }
     return `${stem.slice(0, match.index)}${extension}`;
+}
+
+/**
+ * Whether `copy` is a conflict copy of `note`. Besides the plain case, it
+ * recognises a copy of a note whose name was too long to keep whole beside
+ * the suffix: {@link conflictCopyPath} then cut the name, and
+ * {@link conflictCopyOriginal} can only give the cut one back.
+ */
+export function isConflictCopyOf(copy: string, note: string): boolean {
+    const original = conflictCopyOriginal(copy);
+    if (original === null || original === note) {
+        return original === note;
+    }
+    if (conflictCopyOriginal(note) !== null) {
+        // Another copy, or `copy` itself, whose name also starts with the cut one.
+        return false;
+    }
+    const cut = splitExtension(original);
+    const whole = splitExtension(note);
+    if (parentPath(copy) !== parentPath(note) || cut.extension !== whole.extension) {
+        return false;
+    }
+    const cutName = basename(cut.stem);
+    const noteName = basename(whole.stem);
+    const tail = basename(copy).slice(cutName.length);
+    // Only a name that could not have fitted beside the suffix was cut.
+    return (
+        noteName.length > cutName.length &&
+        noteName.startsWith(cutName) &&
+        byteLength(noteName) + byteLength(tail) > NAME_MAX_BYTES - DEDUPE_RESERVE_BYTES
+    );
 }
 
 /**

@@ -4,7 +4,7 @@ import type ProtonDriveSyncPlugin from '../main';
 import { MAX_MERGE_BYTES } from '../sync/conflicts';
 import type { NoteVersion } from '../sync/engine';
 import { isTextPath } from '../sync/media';
-import { basename, conflictCopyOriginal, parentPath } from '../sync/paths';
+import { basename, conflictCopyOriginal, isConflictCopyOf, parentPath } from '../sync/paths';
 import { DiffModal, type DiffOptions } from './diffModal';
 
 /**
@@ -92,14 +92,19 @@ export function conflictPairsFor(app: App, file: TFile): { original: string; cop
     if (!isTextPath(file.path)) {
         return [];
     }
+    const folder = parentPath(file.path);
+    const neighbours = app.vault.getFiles().filter((candidate) => parentPath(candidate.path) === folder);
     const original = conflictCopyOriginal(file.path);
     if (original !== null) {
-        return app.vault.getFileByPath(original) ? [{ original, copy: file.path }] : [];
+        if (app.vault.getFileByPath(original)) {
+            return [{ original, copy: file.path }];
+        }
+        // The note's name was cut to fit beside the suffix; pair it only when that leaves no doubt.
+        const notes = neighbours.filter((candidate) => isConflictCopyOf(file.path, candidate.path));
+        return notes.length === 1 ? [{ original: notes[0].path, copy: file.path }] : [];
     }
-    const folder = parentPath(file.path);
-    return app.vault
-        .getFiles()
-        .filter((candidate) => parentPath(candidate.path) === folder && conflictCopyOriginal(candidate.path) === file.path)
+    return neighbours
+        .filter((candidate) => isConflictCopyOf(candidate.path, file.path))
         .sort((a, b) => b.stat.mtime - a.stat.mtime)
         .map((copy) => ({ original: file.path, copy: copy.path }));
 }

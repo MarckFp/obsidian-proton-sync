@@ -17,7 +17,9 @@ export type SyncStatus =
     /** Held by the "Wi-Fi only" setting while on a cellular connection. */
     | 'waiting-for-wifi'
     /** The stored sign-in is protected with a PIN that has not been entered yet. Set by the plugin, not the engine. */
-    | 'locked';
+    | 'locked'
+    /** Restoring the stored sign-in and getting ready to sync, at start. Set by the plugin, not the engine. */
+    | 'connecting';
 
 /** A transfer big enough to be worth showing progress for. */
 export type TransferProgress = {
