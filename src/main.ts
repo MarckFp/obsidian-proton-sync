@@ -62,6 +62,14 @@ const CONFLICT_NOTICE_DELAY_MS = 1500;
 /** How often the status bar's "synced 5m ago" is brought up to date. */
 const STATUS_REFRESH_MS = 30_000;
 
+/**
+ * How often a paused device checks the device list for a request, such as
+ * being resumed. Paused, it reads none of Drive's changes, which is how it
+ * learns of one otherwise; a couple of small reads every two minutes is all
+ * this costs, and only while paused.
+ */
+const PAUSED_REQUEST_CHECK_MS = 2 * 60_000;
+
 /** How often the PIN's time limit is checked while Obsidian is open. */
 const LOCK_CHECK_MS = 15_000;
 /** How often, at most, a remembered unlock's expiry is pushed back while Obsidian is in use. */
@@ -166,6 +174,13 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             this.ribbonIcon = this.addRibbonIcon('refresh-cw', 'Proton Drive Sync', () => void this.openPanel());
         }
         this.registerInterval(window.setInterval(() => this.refreshStatus(), STATUS_REFRESH_MS));
+        this.registerInterval(
+            window.setInterval(() => {
+                if (this.settings.paused && this.devicesAvailable()) {
+                    void this.checkDeviceRequests();
+                }
+            }, PAUSED_REQUEST_CHECK_MS),
+        );
 
         const clientUid = this.installationId();
         this.clientUid = clientUid;

@@ -111,6 +111,24 @@ describe('DeviceRegistry', () => {
         assert.equal(written(drive, 'device-me.json').id, 'me');
     });
 
+    it('reads a request updated since, even where the current version is cached as the old one', async () => {
+        const drive = new FakeDrive();
+        await registryOn(drive).ask('me', request('paused', 100));
+        // As the SDK did for a paused device: the file's current version
+        // served from what it cached before the new request arrived.
+        const client = drive.client() as unknown as ProtonDriveClient & {
+            getFileDownloader: (uid: string) => Promise<unknown>;
+            getFileRevisionDownloader: (uid: string) => Promise<unknown>;
+        };
+        const firstRevision = drive.at(`${DEVICES_FOLDER}/request-me.json`)!.revision!.uid;
+        client.getFileDownloader = () => client.getFileRevisionDownloader(firstRevision);
+        const mine = new DeviceRegistry(new DriveIO(client, SILENT), SYNC_ROOT, SILENT);
+        assert.deepEqual(await mine.request('me'), request('paused', 100));
+
+        await registryOn(drive).ask('me', request('active', 101));
+        assert.deepEqual(await mine.request('me'), request('active', 101));
+    });
+
     it('ignores a file it cannot read', async () => {
         const drive = new FakeDrive();
         drive.put(`${DEVICES_FOLDER}/request-me.json`, 'not a request');

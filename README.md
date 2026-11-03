@@ -449,7 +449,8 @@ From there you can **Pause**, **Resume** or **Remove** any other device. Each
 acts on it the next time it checks Drive, which for a device that is closed is
 when Obsidian next opens on it; until then the list says it was asked. A paused
 device stops syncing as if it had been paused by hand, and can be resumed from
-the list or on the device itself. A removed device stops syncing and signs out,
+the list or on the device itself; while paused it still checks the list every
+two minutes, so a resume or removal reaches it. A removed device stops syncing and signs out,
 and syncs the vault again only once someone signs in on it with the account's
 password. Nothing is deleted, on the device or on Drive. **Forget** takes a
 removed device, or one not heard from in a month, off the list.
