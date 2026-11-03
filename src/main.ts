@@ -214,6 +214,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             { configDir: this.app.vault.configDir, pluginDir: this.pluginDir(), pluginId: this.manifest.id },
             {
                 isMobile: Platform.isMobileApp,
+                windows: Platform.isWin,
                 isMetered: () => networkConnection()?.type === 'cellular',
                 isHidden: () => document.visibilityState === 'hidden',
                 openEditor: (path) => this.openEditor(path),

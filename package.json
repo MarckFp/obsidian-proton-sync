@@ -15,7 +15,7 @@
     "dependencies": {
         "@protontech/crypto": "^2.2.0",
         "@protontech/drive-sdk": "^0.23.0",
-        "core-js": "^3.50.0"
+        "core-js": "^3.51.0"
     },
     "devDependencies": {
         "@eslint/js": "^9.39.5",

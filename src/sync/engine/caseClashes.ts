@@ -1,6 +1,16 @@
 import type { Logger } from '../../util/logger';
 import type { DriveIO, RemoteTree } from '../drive';
-import { ancestorPaths, basename, joinPath, parentPath, PathFilter, replacePrefix, splitExtension } from '../paths';
+import {
+    ancestorPaths,
+    basename,
+    joinPath,
+    needsWindowsName,
+    parentPath,
+    PathFilter,
+    replacePrefix,
+    splitExtension,
+    windowsName,
+} from '../paths';
 import type { SyncState } from '../state';
 import type { RemoteState } from '../types';
 import type { VaultIO } from '../vault';
@@ -26,6 +36,10 @@ export type CaseClashHost = {
  * Names that differ only in letter case, on a filesystem that cannot keep
  * them apart: Windows, macOS, iOS and usually Android. Drive can, so clashes
  * are settled there, by renaming the newcomer; see {@link CaseClashes.settleTree}.
+ *
+ * On Windows, also names it cannot store at all, such as `aux.md` or `note.`:
+ * those are renamed on Drive too, so every device syncs them under a name all
+ * of them can store; see `windowsName`.
  */
 export class CaseClashes {
     /** Probed once; see {@link isCaseInsensitive}. */
@@ -34,6 +48,15 @@ export class CaseClashes {
     private readonly reportedCaseClashes = new Set<string>();
 
     constructor(private readonly host: CaseClashHost) {}
+
+    /**
+     * Whether this device cannot store `path` as it is: on Windows, a name in
+     * it that Windows refuses, or would write somewhere else. Such a path is
+     * renamed on Drive, and left out until it has been.
+     */
+    unstorable(path: string): boolean {
+        return this.host.environment.windows === true && needsWindowsName(path);
+    }
 
     /**
      * Paths that collide with another when letter case is ignored.
@@ -59,6 +82,14 @@ export class CaseClashes {
         for (const path of paths) {
             if ([...ancestorPaths(path), path].some((prefix) => spellings.get(prefix.toLowerCase())!.size > 1)) {
                 collisions.add(path);
+            } else if (this.unstorable(path)) {
+                // Renaming it on Drive failed: writing it here would fail too,
+                // or, for a trailing dot or space, land on another file.
+                collisions.add(path);
+                if (!this.reportedCaseClashes.has(path)) {
+                    this.reportedCaseClashes.add(path);
+                    this.host.logger.warn(`Not syncing "${path}": Windows cannot store its name, and it could not be renamed on Drive`);
+                }
             }
         }
         for (const group of spellings.values()) {
@@ -137,6 +168,7 @@ export class CaseClashes {
      * so a folder renamed this way takes its files along.
      */
     async settleTree(tree: RemoteTree, local: { files: string[]; folders: string[] }): Promise<void> {
+        await this.settleWindowsNames(tree, local);
         if (!(await this.isCaseInsensitive())) {
             return;
         }
@@ -166,6 +198,29 @@ export class CaseClashes {
     }
 
     /**
+     * On Windows, rename on Drive every name in the tree that Windows cannot
+     * store, folders first so their files move with them. Every device then
+     * syncs it under the new name, which all of them can store.
+     */
+    private async settleWindowsNames(tree: RemoteTree, local: { files: string[]; folders: string[] }): Promise<void> {
+        if (this.host.environment.windows !== true) {
+            return;
+        }
+        const taken = this.claimants([...local.folders, ...local.files, ...tree.folders.keys(), ...tree.files.keys()]);
+        for (const path of [...tree.folders.keys(), ...tree.files.keys()].sort(byDepth)) {
+            const uid = tree.folders.get(path) ?? tree.files.get(path)?.nodeUid;
+            if (uid === undefined || windowsName(basename(path)) === null || this.host.filter().isExcludedWithAncestors(path)) {
+                // Re-keyed under a folder renamed earlier in this loop, fine as it is, or not synced.
+                continue;
+            }
+            const renamed = await this.renameForWindows(uid, path, taken);
+            if (renamed !== null) {
+                renameInTree(tree, path, renamed);
+            }
+        }
+    }
+
+    /**
      * The same, for paths arriving one at a time from Drive's events: a path
      * with no record whose name, or any folder above it, clashes with a
      * recorded one is renamed on Drive first, and the pass goes on with its new
@@ -180,6 +235,11 @@ export class CaseClashes {
                 continue;
             }
             const resolved = await this.resolve(path, claimants);
+            if (this.unstorable(resolved)) {
+                // Could not be renamed: written here, it would fail, or land on another file.
+                this.host.logger.warn(`Not syncing "${resolved}": Windows cannot store its name, and it could not be renamed on Drive`);
+                continue;
+            }
             const clash = [...ancestorPaths(resolved), resolved].find((prefix) => {
                 const owner = claimants.get(prefix.toLowerCase());
                 return owner !== undefined && owner !== prefix;
@@ -206,7 +266,8 @@ export class CaseClashes {
         const prefixes = [...ancestorPaths(path), path];
         for (const [index, prefix] of prefixes.entries()) {
             const owner = claimants.get(prefix.toLowerCase());
-            if (owner === undefined || owner === prefix) {
+            const clashes = owner !== undefined && owner !== prefix;
+            if (!clashes && !(this.host.environment.windows === true && windowsName(basename(prefix)) !== null)) {
                 continue;
             }
             const isFolder = index < prefixes.length - 1;
@@ -216,13 +277,15 @@ export class CaseClashes {
                     ? await this.host.findRemoteFolder(prefix)
                     : (await this.host.findByName(prefix))?.nodeUid;
             } catch (error) {
-                this.host.logger.debug(`Could not look up "${prefix}" to settle a case clash`, error);
+                this.host.logger.debug(`Could not look up "${prefix}" to rename it on Drive`, error);
             }
             if (uid === undefined) {
                 // Not on Drive, so not this device's to rename.
                 return path;
             }
-            const renamed = await this.renameForCase(uid, prefix, owner, isFolder, claimants);
+            const renamed = clashes
+                ? await this.renameForCase(uid, prefix, owner, isFolder, claimants)
+                : await this.renameForWindows(uid, prefix, claimants);
             return renamed === null ? path : replacePrefix(path, prefix, renamed);
         }
         return path;
@@ -241,27 +304,71 @@ export class CaseClashes {
     ): Promise<string | null> {
         const name = basename(path);
         const { stem, extension } = isFolder ? { stem: name, extension: '' } : splitExtension(name);
-        for (let n = 1; n <= 20; n++) {
-            const candidate = `${stem} (case conflict${n === 1 ? '' : ` ${n}`})${extension}`;
-            const target = joinPath(parentPath(path), candidate);
-            if (claimants.has(target.toLowerCase())) {
-                continue;
-            }
-            try {
-                await this.host.drive().renameNode(nodeUid, candidate);
-            } catch (error) {
-                if (error instanceof NodeWithSameNameExistsValidationError) {
-                    continue;
-                }
-                this.host.logger.warn(`Could not rename "${path}" on Drive to settle a case clash with "${owner}"`, error);
-                return null;
-            }
-            claimants.set(target.toLowerCase(), target);
+        const target = await this.renameOnDrive(
+            nodeUid,
+            path,
+            (n) => `${stem} (case conflict${n === 1 ? '' : ` ${n}`})${extension}`,
+            claimants,
+            `settle a case clash with "${owner}"`,
+        );
+        if (target !== null) {
             this.host.logger.warn(
                 `"${path}" and "${owner}" differ only in letter case, which this device cannot tell apart; ` +
                     `renamed "${path}" to "${target}" on Drive`,
             );
             this.host.reportConflict({ path: owner, reason: 'case-collision', outcome: 'renamed', copyPath: target });
+        }
+        return target;
+    }
+
+    /**
+     * Rename a node on Drive whose name Windows cannot store; see
+     * `windowsName`. Returns the new path, or null if it could not be renamed.
+     */
+    private async renameForWindows(nodeUid: string, path: string, claimants: Map<string, string>): Promise<string | null> {
+        const name = basename(path);
+        const target = await this.renameOnDrive(
+            nodeUid,
+            path,
+            (n) => windowsName(name, n)!,
+            claimants,
+            'give it a name Windows can store',
+        );
+        if (target !== null) {
+            this.host.logger.warn(`Windows cannot store the name "${path}"; renamed it to "${target}" on Drive`);
+            this.host.reportConflict({ path, reason: 'windows-name', outcome: 'renamed', copyPath: target });
+        }
+        return target;
+    }
+
+    /**
+     * Rename a node on Drive to the first name `candidate` gives, from 1 up,
+     * that is free here and on Drive. Returns the new path, or null if it
+     * could not be renamed, which is logged as failing to do `purpose`.
+     */
+    private async renameOnDrive(
+        nodeUid: string,
+        path: string,
+        candidate: (n: number) => string,
+        claimants: Map<string, string>,
+        purpose: string,
+    ): Promise<string | null> {
+        for (let n = 1; n <= 20; n++) {
+            const name = candidate(n);
+            const target = joinPath(parentPath(path), name);
+            if (claimants.has(target.toLowerCase())) {
+                continue;
+            }
+            try {
+                await this.host.drive().renameNode(nodeUid, name);
+            } catch (error) {
+                if (error instanceof NodeWithSameNameExistsValidationError) {
+                    continue;
+                }
+                this.host.logger.warn(`Could not rename "${path}" on Drive to ${purpose}`, error);
+                return null;
+            }
+            claimants.set(target.toLowerCase(), target);
             return target;
         }
         return null;

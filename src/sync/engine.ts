@@ -327,7 +327,7 @@ export class SyncEngine {
             add(path, 'too-large', `${megabytes(bytes)} MB`);
         }
         for (const path of this.caseCollisions) {
-            add(path, 'name-clash');
+            add(path, this.cases.unstorable(path) ? 'windows-name' : 'name-clash');
         }
         return [...found.values()].sort((a, b) => a.path.localeCompare(b.path));
     }

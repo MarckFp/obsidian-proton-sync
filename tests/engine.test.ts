@@ -1828,6 +1828,70 @@ describe('SyncEngine — names on Drive that would lead out of the vault', () =>
     });
 });
 
+describe('SyncEngine — names Windows cannot store', () => {
+    const WINDOWS: EngineEnvironment = { isMobile: false, isMetered: () => false, caseInsensitive: true, windows: true };
+
+    it('renames them on Drive, so every device syncs them under names all of them can store', async () => {
+        const drive = new FakeDrive();
+        drive.put('aux.md', 'device name');
+        drive.put('note', 'the note');
+        drive.put('note.', 'a different note');
+        drive.put('Logs/10:30.md', 'a time');
+        const { vault, settled } = await setup({ drive, environment: WINDOWS });
+        await settled();
+
+        assert.equal(drive.text('aux (renamed for Windows).md'), 'device name');
+        assert.equal(drive.text('note (renamed for Windows)'), 'a different note');
+        assert.equal(vault.read('aux (renamed for Windows).md'), 'device name');
+        assert.equal(vault.read('note'), 'the note', 'not written over by "note."');
+        assert.equal(vault.read('note (renamed for Windows)'), 'a different note');
+        assert.equal(vault.read('Logs/10-30 (renamed for Windows).md'), 'a time');
+    });
+
+    it('renames one that arrives from another device while syncing', async () => {
+        const { vault, drive, engine, settled } = await setup({ environment: WINDOWS });
+        await settled();
+
+        drive.emit(drive.put('Meeting 10:30.md', 'agenda'), DriveEventType.NodeCreated);
+        engine.pollNow();
+        await settled();
+
+        assert.equal(drive.at('Meeting 10:30.md'), undefined);
+        assert.equal(vault.read('Meeting 10-30 (renamed for Windows).md'), 'agenda');
+    });
+
+    it('leaves one out, and says why, when it cannot be renamed on Drive', async () => {
+        const drive = new FakeDrive();
+        drive.put('note', 'the note');
+        drive.put('note.', 'a different note');
+        const client = drive.client.bind(drive);
+        drive.client = () => ({
+            ...client(),
+            renameNode: async () => {
+                throw new Error('shared with you to view only');
+            },
+        });
+        const { vault, engine, settled } = await setup({ drive, environment: WINDOWS });
+        await settled();
+
+        assert.equal(vault.read('note'), 'the note');
+        assert.deepEqual(
+            engine.pendingChanges().filter((change) => change.path === 'note.'),
+            [{ path: 'note.', reason: 'windows-name' }],
+        );
+    });
+
+    it('leaves the names alone on a device that can store them', async () => {
+        const drive = new FakeDrive();
+        drive.put('aux.md', 'device name');
+        const { vault, settled } = await setup({ drive });
+        await settled();
+
+        assert.equal(drive.text('aux.md'), 'device name');
+        assert.equal(vault.read('aux.md'), 'device name');
+    });
+});
+
 describe('SyncEngine — the device list', () => {
     const RECORD = `${DEVICES_FOLDER}/device-laptop.json`;
 
