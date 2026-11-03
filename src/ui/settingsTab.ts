@@ -579,6 +579,27 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                         ),
                 },
                 {
+                    name: 'Attempts to reach the sign-in',
+                    desc:
+                        'Every call another plugin makes to the Proton secret storage, and every look for a credentials ' +
+                        'field on this plugin, is recorded here with the plugin it came from.',
+                    render: (setting) => {
+                        const hits = getRuntime().tripwire?.hits ?? [];
+                        const box = setting.settingEl.createDiv({ cls: 'proton-drive-sync-tripwire' });
+                        if (hits.length === 0) {
+                            box.setText('Nothing has reached for the sign-in since this start.');
+                            return;
+                        }
+                        box.createEl('p', { text: `${hits.length} attempt(s) since this start:` });
+                        for (const hit of hits.slice(-10).reverse()) {
+                            const what = hit.ids && hit.ids[0] !== '*' ? ` (${hit.ids[0]})` : '';
+                            box.createEl('p', {
+                                text: `• ${new Date(hit.at).toLocaleTimeString()} ${hit.by ?? 'outside a plugin'} → ${hit.wire}${what}`,
+                            });
+                        }
+                    },
+                },
+                {
                     name: 'Plugins seen at the last start',
                     desc: 'Rescan now, or read the list and what changed since the previous start.',
                     render: (setting) => {

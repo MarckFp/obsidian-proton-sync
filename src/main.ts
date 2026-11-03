@@ -5,6 +5,7 @@ import './polyfills';
 
 import { getRuntime } from './runtime';
 import { watchPlugins } from './security/pluginWatch';
+import { installTripwires } from './security/tripwire';
 import {
     apiVersion,
     type App,
@@ -143,6 +144,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     /** What the status bar, ribbon icon and panel currently show. */
     private summary!: SyncSummary;
     private conflictNoticeTimer: number | null = null;
+    /** Tripwire hits already announced, so a repeating caller is not a stream of notices. */
+    private tripwireNotices: Set<string> | null = null;
 
     override async onload(): Promise<void> {
         await this.loadSettings();
@@ -151,6 +154,28 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         // After the workspace is ready, so the first start of the day does not
         // delay anything the user is waiting for.
         setLogShowsNames(this.settings.logShowsNames ?? false);
+        // Nothing can stop a plugin in this process, but the moment one reaches
+        // for the sign-in it can be named. See security/tripwire.ts.
+        runtime.tripwire = installTripwires({
+            app: this.app,
+            selfId: this.manifest.id,
+            instance: this,
+            logger: runtime.logger.getLogger('security'),
+            onHit: (hit) => {
+                const announced = this.tripwireNotices ?? (this.tripwireNotices = new Set<string>());
+                const key = `${hit.by ?? 'unknown'}:${hit.wire}`;
+                if (announced.has(key)) {
+                    return;
+                }
+                announced.add(key);
+                runtime.logger.warn(`Tripwire: ${hit.by ?? 'something'} reached ${hit.wire}`);
+                new Notice(
+                    `Proton Drive Sync: ${hit.by ?? 'something'} reached for the Proton sign-in (${hit.wire}). ` +
+                        'Settings → Proton Drive Sync → Security lists it.',
+                    15000,
+                );
+            },
+        });
         this.statusBar = new StatusBar(this.addStatusBarItem(), {
             syncNow: () => void this.syncNowOrSetUp(),
             togglePause: () => void this.setPaused(!this.settings.paused),
