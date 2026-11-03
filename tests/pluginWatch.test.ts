@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { diffPlugins, type PluginFingerprint } from '../src/security/pluginWatch';
+import { alertsFrom, capabilitiesIn, diffPlugins, type PluginFingerprint } from '../src/security/pluginWatch';
 
-function plugin(id: string, version = '1.0.0', digest = 'aaaa'): PluginFingerprint {
-    return { id, name: id, version, author: 'someone', digest, size: 100 };
+function plugin(id: string, version = '1.0.0', digest = 'aaaa', touches: string[] = []): PluginFingerprint {
+    return { id, name: id, version, author: 'someone', digest, size: 100, touches };
 }
 
 describe('watching the other plugins in the vault', () => {
@@ -51,5 +51,54 @@ describe('watching the other plugins in the vault', () => {
         const changes = diffPlugins([], [plugin('a'), plugin('b')]);
         assert.equal(changes.length, 2);
         assert.ok(changes.every((change) => change.kind === 'added'));
+    });
+});
+
+describe('what is worth interrupting the user for', () => {
+    it('says nothing about an update Obsidian announces itself', () => {
+        const alerts = alertsFrom([plugin('a', '1.0.0', 'aaaa')], [plugin('a', '1.1.0', 'bbbb')]);
+        assert.deepEqual(alerts, []);
+    });
+
+    it('reports the same version with different code: an update never produces that', () => {
+        const alerts = alertsFrom([plugin('a', '1.0.0', 'aaaa')], [plugin('a', '1.0.0', 'bbbb')]);
+        assert.equal(alerts.length, 1);
+        assert.equal(alerts[0].reason, 'unannounced-code');
+        assert.match(alerts[0].why, /same version 1\.0\.0, different code/);
+    });
+
+    it('reports an update that starts reaching for credential APIs', () => {
+        const alerts = alertsFrom(
+            [plugin('a', '1.0.0', 'aaaa', [])],
+            [plugin('a', '1.1.0', 'bbbb', ['secretStorage'])],
+        );
+        assert.equal(alerts.length, 1);
+        assert.equal(alerts[0].reason, 'new-capability');
+        assert.match(alerts[0].why, /now mentions secretStorage/);
+    });
+
+    it('does not re-report a capability the plugin already had', () => {
+        const alerts = alertsFrom(
+            [plugin('a', '1.0.0', 'aaaa', ['secretStorage'])],
+            [plugin('a', '1.1.0', 'bbbb', ['secretStorage', 'safeStorage'])],
+        );
+        assert.equal(alerts.length, 1);
+        assert.match(alerts[0].why, /now mentions safeStorage$/);
+    });
+
+    it('says nothing about a plugin that was just installed or removed', () => {
+        assert.deepEqual(alertsFrom([], [plugin('a')]), []);
+        assert.deepEqual(alertsFrom([plugin('a')], []), []);
+    });
+
+    it('says nothing when a bundle cannot be read, rather than guessing', () => {
+        assert.deepEqual(alertsFrom([plugin('a', '1.0.0', null as never)], [plugin('a', '1.0.0', 'bbbb')]), []);
+        assert.deepEqual(alertsFrom([plugin('a', '1.0.0', 'aaaa')], [plugin('a', '1.0.0', null as never)]), []);
+    });
+
+    it('finds the API names in a bundle, and only those', () => {
+        const bundle = 'app.secretStorage.getSecret(x); app.plugins.plugins["y"]; electron.safeStorage';
+        assert.deepEqual(capabilitiesIn(bundle).sort(), ['plugins.plugins', 'safeStorage', 'secretStorage']);
+        assert.deepEqual(capabilitiesIn('function add(a,b){return a+b}'), []);
     });
 });

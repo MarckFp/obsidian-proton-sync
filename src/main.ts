@@ -739,20 +739,17 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         try {
             const report = await watchPlugins(this.app, this.manifest.id, this.pluginDir());
             runtime.pluginWatch = report;
-            const notable = report.changes.filter((change) => change.kind !== 'removed');
-            if (notable.length === 0) {
+            // Only what Obsidian's own update notice would not say; an update
+            // announced by Obsidian is not worth repeating. See PluginAlert.
+            if (report.alerts.length === 0) {
                 return;
             }
-            const listed = notable
+            const listed = report.alerts
                 .slice(0, 3)
-                .map((change) => `${change.name} (${change.kind === 'added' ? 'new' : change.detail})`)
-                .join(', ');
-            const more = notable.length > 3 ? ` and ${notable.length - 3} more` : '';
-            new Notice(
-                `Proton Drive Sync: ${listed}${more} changed since the last start. ` +
-                    'Any plugin here can read this vault and the Proton sign-in — check Settings → Community plugins.',
-                15000,
-            );
+                .map((alert) => `${alert.name}: ${alert.why}`)
+                .join('; ');
+            const more = report.alerts.length > 3 ? ` and ${report.alerts.length - 3} more` : '';
+            new Notice(`Proton Drive Sync: ${listed}${more}. See Settings → Proton Drive Sync → Security.`, 15000);
         } catch (error) {
             runtime.logger.warn('Could not scan the other plugins in this vault', error);
         }

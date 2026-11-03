@@ -652,8 +652,11 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                     },
                 },
                 {
-                    name: 'Plugins seen at the last start',
-                    desc: 'Rescan now, or read the list and what changed since the previous start.',
+                    name: 'Changes Obsidian would not announce',
+                    desc:
+                        'An update is announced by Obsidian, so it is not repeated here. Two things are: the same ' +
+                        'version with different code, and an update whose new code starts reaching for credential ' +
+                        'APIs (secretStorage, other plugins’ internals) that it did not mention before.',
                     render: (setting) => {
                         setting.addButton((button) =>
                             button.setButtonText('Rescan').onClick(() => void this.plugin.scanOtherPlugins()),
@@ -664,24 +667,30 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                             box.setText('Nothing scanned yet.');
                             return;
                         }
-                        const head =
-                            report.plugins.length === 0
-                                ? 'No other plugins are installed in this vault.'
-                                : report.baseline
-                                  ? `${report.plugins.length} other plugin(s), recorded as the starting point.`
-                                  : `${report.plugins.length} other plugin(s), ${report.changes.length} change(s) since the last start.`;
-                        box.createEl('p', { text: head });
-                        for (const change of report.changes) {
-                            const line = change.kind === 'added' ? 'new' : change.kind === 'removed' ? 'removed' : 'changed';
-                            box.createEl('p', { text: `• ${change.name} — ${line} (${change.detail})` });
+                        if (report.plugins.length === 0) {
+                            box.setText('No other plugins are installed in this vault.');
+                            return;
                         }
-                        if (report.plugins.length > 0) {
-                            const details = box.createEl('details');
-                            details.createEl('summary', { text: `All ${report.plugins.length} plugin(s)` });
-                            for (const plugin of report.plugins) {
-                                const tag = plugin.digest ? plugin.digest.slice(0, 8) : 'unreadable';
-                                details.createEl('p', { text: `• ${plugin.name} ${plugin.version} — ${tag}` });
+                        if (report.alerts.length === 0) {
+                            box.setText(`${report.plugins.length} other plugin(s); nothing since the last start that Obsidian would not already tell you.`);
+                        }
+                        for (const alert of report.alerts) {
+                            box.createEl('p', { text: `• ${alert.name} — ${alert.why}` });
+                        }
+                        if (report.changes.length > 0) {
+                            const updates = box.createEl('details');
+                            updates.createEl('summary', { text: `Updates since the last start (${report.changes.length})` });
+                            for (const change of report.changes) {
+                                const line =
+                                    change.kind === 'added' ? 'new' : change.kind === 'removed' ? 'removed' : 'changed';
+                                updates.createEl('p', { text: `• ${change.name} — ${line} (${change.detail})` });
                             }
+                        }
+                        const all = box.createEl('details');
+                        all.createEl('summary', { text: `All ${report.plugins.length} plugin(s)` });
+                        for (const plugin of report.plugins) {
+                            const tag = plugin.digest ? plugin.digest.slice(0, 8) : 'unreadable';
+                            all.createEl('p', { text: `• ${plugin.name} ${plugin.version} — ${tag}` });
                         }
                     },
                 },

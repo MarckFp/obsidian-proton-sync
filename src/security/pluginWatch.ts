@@ -21,6 +21,13 @@ export type PluginFingerprint = {
     /** sha-256 of `main.js`, or null when it could not be read (no folder, unreadable). */
     digest: string | null;
     size: number;
+    /**
+     * Which credential-facing APIs the bundle mentions, e.g. `secretStorage`.
+     *
+     * Kept so an update that starts reaching for other plugins' secrets can be
+     * told apart from an update that fixes a typo. Names only; nothing is run.
+     */
+    touches: string[];
 };
 
 export type PluginChange = {
@@ -31,13 +38,41 @@ export type PluginChange = {
     detail: string;
 };
 
+/**
+ * Something Obsidian's own update notice would not tell you.
+ *
+ * A plugin updating is announced by Obsidian, with a changelog, so repeating it
+ * is noise. Two things are not announced:
+ *
+ * - the same version with different code, which an update never produces;
+ * - an update whose new code starts reaching for credential APIs it did not
+ *   mention before, which is what "this plugin can now read the sign-in" looks
+ *   like from the outside.
+ */
+export type PluginAlert = {
+    id: string;
+    name: string;
+    version: string;
+    reason: 'unannounced-code' | 'new-capability';
+    /** One line, in the words this plugin can defend. */
+    why: string;
+};
+
 export type PluginWatchReport = {
     at: number;
     /** True on the first run, when there is nothing to compare against yet. */
     baseline: boolean;
     changes: PluginChange[];
+    alerts: PluginAlert[];
     plugins: PluginFingerprint[];
 };
+
+/** The APIs worth noticing when a bundle starts mentioning them. */
+const CAPABILITY_WORDS = ['secretStorage', 'safeStorage', 'plugins.plugins', 'proton-drive-sync'] as const;
+
+export function capabilitiesIn(bundle: string): string[] {
+    return CAPABILITY_WORDS.filter((word) => bundle.includes(word));
+}
 
 const BASELINE_FILE = 'plugin-baseline.json';
 
@@ -64,12 +99,14 @@ export async function fingerprintPlugins(app: App, selfId: string): Promise<Plug
         const dir = typeof manifest.dir === 'string' ? manifest.dir : null;
         let digestValue: string | null = null;
         let size = 0;
+        let touches: string[] = [];
         if (dir) {
             const path = `${dir}/main.js`;
             try {
                 const bytes = await app.vault.adapter.readBinary(path);
                 size = bytes.byteLength;
                 digestValue = await digest(bytes);
+                touches = capabilitiesIn(new TextDecoder().decode(bytes));
             } catch {
                 // A plugin whose code cannot be read is worth noticing, but not
                 // worth failing the whole scan over.
@@ -83,6 +120,7 @@ export async function fingerprintPlugins(app: App, selfId: string): Promise<Plug
             author: text(manifest.author, '?'),
             digest: digestValue,
             size,
+            touches,
         });
     }
     return out.sort((a, b) => a.id.localeCompare(b.id));
@@ -124,6 +162,39 @@ export function diffPlugins(before: PluginFingerprint[], after: PluginFingerprin
     return changes.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** The subset worth interrupting the user for; see {@link PluginAlert}. */
+export function alertsFrom(before: PluginFingerprint[], after: PluginFingerprint[]): PluginAlert[] {
+    const previous = new Map(before.map((entry) => [entry.id, entry]));
+    const alerts: PluginAlert[] = [];
+    for (const entry of after) {
+        const was = previous.get(entry.id);
+        if (!was || !entry.digest || !was.digest || entry.digest === was.digest) {
+            continue;
+        }
+        if (was.version === entry.version) {
+            alerts.push({
+                id: entry.id,
+                name: entry.name,
+                version: entry.version,
+                reason: 'unannounced-code',
+                why: `same version ${entry.version}, different code — an update does not do that`,
+            });
+            continue;
+        }
+        const fresh = entry.touches.filter((word) => !was.touches.includes(word));
+        if (fresh.length > 0) {
+            alerts.push({
+                id: entry.id,
+                name: entry.name,
+                version: entry.version,
+                reason: 'new-capability',
+                why: `${was.version} → ${entry.version} now mentions ${fresh.join(', ')}`,
+            });
+        }
+    }
+    return alerts.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 export async function loadBaseline(app: App, folder: string): Promise<PluginFingerprint[] | null> {
     const path = `${folder}/${BASELINE_FILE}`;
     try {
@@ -147,8 +218,9 @@ export async function watchPlugins(app: App, selfId: string, folder: string): Pr
     const plugins = await fingerprintPlugins(app, selfId);
     const before = await loadBaseline(app, folder);
     const changes = before ? diffPlugins(before, plugins) : [];
+    const alerts = before ? alertsFrom(before, plugins) : [];
     // Always rewrite: a plugin whose code could not be read once should be
     // reported when it becomes readable, and vice versa.
     await saveBaseline(app, folder, plugins);
-    return { at: Date.now(), baseline: before === null, changes, plugins };
+    return { at: Date.now(), baseline: before === null, changes, alerts, plugins };
 }
