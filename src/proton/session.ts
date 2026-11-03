@@ -172,9 +172,11 @@ export class ProtonSession {
      * them.
      *
      * Returns as soon as the URL is known so the caller can show it, with the
-     * long poll for approval left on `completion`.
+     * long poll for approval left on `completion`. `onApproved` runs once
+     * the user has approved, before the session is set up, which takes a few
+     * more seconds.
      */
-    async beginWebSignIn(signal?: AbortSignal): Promise<SignInHandle> {
+    async beginWebSignIn(signal?: AbortSignal, onApproved?: () => void): Promise<SignInHandle> {
         const auth = this.auth;
         if (!auth) {
             throw new Error('Proton session is not initialised');
@@ -185,6 +187,7 @@ export class ProtonSession {
         const completion = auth
             .authViaWeb((signInUrl) => resolveUrl(signInUrl), signal)
             .then(async () => {
+                onApproved?.();
                 await this.buildClient(initCryptoOnce());
 
                 const primary = await this.addresses!.getOwnPrimaryAddress();

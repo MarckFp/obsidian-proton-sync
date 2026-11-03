@@ -7,7 +7,7 @@ import type { VersionComparison } from './compare';
 import { DeletedModal } from './deletedModal';
 import { DriveList } from './driveList';
 import { ListingSchedule } from './listingSchedule';
-import { lastSynced, pendingText, statusDescription, statusDetails, statusIcon, statusLabel } from './syncStatus';
+import { lastSynced, pendingText, statusDescription, statusDetails, statusIcon, statusLabel, statusSpins } from './syncStatus';
 import { VersionsModal } from './versionsModal';
 
 export const SYNC_PANEL_VIEW = 'proton-drive-sync-panel';
@@ -191,7 +191,7 @@ export class SyncPanelView extends ItemView {
         }
 
         setIcon(this.iconEl, statusIcon(summary));
-        this.iconEl.toggleClass('proton-drive-sync-spin', summary.status === 'syncing');
+        this.iconEl.toggleClass('proton-drive-sync-spin', statusSpins(summary));
         this.labelEl.setText(statusLabel(summary));
         this.descriptionEl.setText(statusDescription(summary));
 

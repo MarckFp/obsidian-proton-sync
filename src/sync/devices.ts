@@ -135,6 +135,8 @@ export function standingOf(entry: Pick<DeviceEntry, 'record' | 'request'>): Devi
 
 type RegistryDrive = Pick<
     DriveIO,
+    | 'getNode'
+    | 'nameOf'
     | 'iterateChildren'
     | 'createFolder'
     | 'uploadNewFile'
@@ -143,6 +145,15 @@ type RegistryDrive = Pick<
     | 'downloadRevision'
     | 'trashNode'
 >;
+
+/**
+ * Where the list's folder was found last time, kept between runs: finding it
+ * again means listing the whole synced folder, which held up every start.
+ */
+export type FolderMemory = {
+    load(): string | null;
+    save(uid: string): void;
+};
 
 /**
  * The device list's folder on Drive: reading and writing its files.
@@ -160,6 +171,7 @@ export class DeviceRegistry {
         private readonly drive: RegistryDrive,
         private readonly rootUid: string,
         private readonly logger: Logger,
+        private readonly memory: FolderMemory | null = null,
     ) {}
 
     /** Learn where the folder is, from a listing of the synced folder or an event. */
@@ -167,6 +179,20 @@ export class DeviceRegistry {
         if (this.folderUid !== uid) {
             this.folderUid = uid;
             this.files = null;
+            this.memory?.save(uid);
+        }
+    }
+
+    /**
+     * Find the folder and list it, so that reading a request next costs no
+     * more than the file itself. Run beside other work at start; a failure
+     * here is met again, and reported, by whatever reads the list next.
+     */
+    async prepare(): Promise<void> {
+        try {
+            await this.listing(false);
+        } catch (error) {
+            this.logger.debug('Could not read the device list ahead of time', error);
         }
     }
 
@@ -327,6 +353,11 @@ export class DeviceRegistry {
         if (this.folderUid !== null) {
             return this.folderUid;
         }
+        const remembered = await this.rememberedFolder();
+        if (remembered !== null) {
+            this.knowFolder(remembered);
+            return remembered;
+        }
         for await (const { node, name } of this.drive.iterateChildren(this.rootUid)) {
             if (name === DEVICES_FOLDER && node.type === NodeType.Folder) {
                 this.knowFolder(node.uid);
@@ -346,6 +377,26 @@ export class DeviceRegistry {
             this.knowFolder(error.existingNodeUid);
         }
         return this.folderUid;
+    }
+
+    /** The folder found last time, if it is still the list's folder: one lookup, often answered from the SDK's cache. */
+    private async rememberedFolder(): Promise<string | null> {
+        const uid = this.memory?.load() ?? null;
+        if (uid === null) {
+            return null;
+        }
+        try {
+            const node = await this.drive.getNode(uid);
+            const stillIt =
+                node.type === NodeType.Folder &&
+                node.parentUid === this.rootUid &&
+                node.trashTime === undefined &&
+                this.drive.nameOf(node) === DEVICES_FOLDER;
+            return stillIt ? uid : null;
+        } catch (error) {
+            this.logger.debug('Could not look up the device list’s folder; looking for it again', error);
+            return null;
+        }
     }
 }
 

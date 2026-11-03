@@ -24,9 +24,10 @@ import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
 import { ProtonSession } from './proton/session';
 import { DEFAULT_SETTINGS, type PluginSettings } from './settings';
 import type { ChosenFolder } from './ui/folderPickerModal';
-import { DeviceList, DeviceRegistry, nextRequestAt, type DeviceRequest } from './sync/devices';
+import { DeviceList, DeviceRegistry, nextRequestAt, type DeviceRequest, type FolderMemory } from './sync/devices';
 import { DriveIO, sharedWithOthers } from './sync/drive';
 import { SyncEngine, type ConflictEvent, type OpenEditor, type SyncPlan, type SyncSummary } from './sync/engine';
+import { errorMessage } from './sync/engine/helpers';
 import { SyncState } from './sync/state';
 import { formatLogEntries, Logger } from './util/logger';
 import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor, versionComparison } from './ui/compare';
@@ -41,7 +42,7 @@ import { SetupModal } from './ui/setupModal';
 import { ShareModal } from './ui/shareModal';
 import { StatusBar } from './ui/statusBar';
 import { SYNC_PANEL_VIEW, SyncPanelView } from './ui/syncPanel';
-import { type NoteIndicator, noteIndicator, statusIcon, statusLabel } from './ui/syncStatus';
+import { type NoteIndicator, noteIndicator, statusIcon, statusLabel, statusSpins } from './ui/syncStatus';
 
 /** Where 0.1.0 kept the session; migrated into secret storage on first load. */
 const LEGACY_SESSION_FILE = 'session.json';
@@ -55,6 +56,8 @@ const CLIENT_UID_KEY = 'proton-drive-sync-client-uid';
  * in the settings, which another sync tool might copy to a different device.
  */
 const HANDLED_REQUEST_KEY = 'proton-drive-sync-device-request-handled';
+/** Where the device list's folder was found, so a start need not search the synced folder for it. */
+const DEVICES_FOLDER_KEY = 'proton-drive-sync-devices-folder';
 
 /** Conflicts found within this long of each other share one notice. */
 const CONFLICT_NOTICE_DELAY_MS = 1500;
@@ -251,7 +254,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             this.logger.getLogger('devices'),
         );
 
-        this.summary = this.engine.getSummary();
+        // Until connect() says otherwise: a stored sign-in is being restored,
+        // which can take a few seconds, and "Sign in" would be wrong meanwhile.
+        this.summary = { ...this.engine.getSummary(), status: 'connecting' };
         this.settingsTab = new ProtonDriveSyncSettingsTab(this.app, this);
         this.addSettingTab(this.settingsTab);
         this.registerCommands();
@@ -576,6 +581,17 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * the plugin becomes active without a reload.
      */
     async connect(): Promise<void> {
+        try {
+            await this.connectSession();
+        } catch (error) {
+            // Nothing above expects to fail; without this the status would
+            // keep saying "Connecting".
+            this.logger.error('Could not start syncing', error);
+            this.showStatus({ ...this.engine.getSummary(), status: 'error', lastError: errorMessage(error) });
+        }
+    }
+
+    private async connectSession(): Promise<void> {
         this.pinEnabled = (await this.sessionSlot.protection()) === 'pin';
         this.locked = await this.sessionSlot.isLocked();
         if (this.locked && this.settings.pinLockAfterMinutes > 0) {
@@ -592,6 +608,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 return;
             }
         }
+        this.showStatus({ ...this.engine.getSummary(), status: 'connecting' });
         try {
             await this.session.init();
         } catch (error) {
@@ -736,13 +753,23 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     private async openDeviceList(rootUid: string): Promise<boolean> {
         const client = this.session.getClient();
         const logger = this.logger.getLogger('devices');
-        const shared =
-            this.settings.remoteFolderSharedBy !== null ||
-            (await sharedWithOthers(client, rootUid).catch((error: unknown) => {
-                logger.warn('Could not check whether the folder is shared; the device list stays off for now', error);
-                return true;
-            }));
-        const registry = shared ? null : new DeviceRegistry(new DriveIO(client, logger), rootUid, logger);
+        let registry: DeviceRegistry | null = null;
+        let shared = this.settings.remoteFolderSharedBy !== null;
+        if (!shared) {
+            registry = new DeviceRegistry(new DriveIO(client, logger), rootUid, logger, this.devicesFolderMemory(rootUid));
+            // Both hold up the sync, so they run side by side; the list read
+            // here is dropped if the folder turns out to be shared.
+            [shared] = await Promise.all([
+                sharedWithOthers(client, rootUid).catch((error: unknown) => {
+                    logger.warn('Could not check whether the folder is shared; the device list stays off for now', error);
+                    return true;
+                }),
+                registry.prepare(),
+            ]);
+            if (shared) {
+                registry = null;
+            }
+        }
         this.devices.open(registry);
         this.engine.watchDevices(registry);
         this.devicesOffForSharing = shared;
@@ -762,6 +789,17 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             this.notify(requestNotice(request));
         }
         return true;
+    }
+
+    /** Where this vault found the device list's folder last time, for the folder it syncs with. */
+    private devicesFolderMemory(rootUid: string): FolderMemory {
+        return {
+            load: () => {
+                const saved = this.app.loadLocalStorage(DEVICES_FOLDER_KEY) as { rootUid?: unknown; uid?: unknown } | null;
+                return saved?.rootUid === rootUid && typeof saved.uid === 'string' ? saved.uid : null;
+            },
+            save: (uid) => this.app.saveLocalStorage(DEVICES_FOLDER_KEY, { rootUid, uid }),
+        };
     }
 
     private closeDeviceList(): void {
@@ -1042,7 +1080,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.refreshSettingsTab();
         if (this.ribbonIcon) {
             setIcon(this.ribbonIcon, statusIcon(summary));
-            this.ribbonIcon.toggleClass('proton-drive-sync-spin', summary.status === 'syncing');
+            this.ribbonIcon.toggleClass('proton-drive-sync-spin', statusSpins(summary));
             setTooltip(this.ribbonIcon, `Proton Drive Sync: ${statusLabel(summary)}`);
         }
         for (const leaf of this.app.workspace.getLeavesOfType(SYNC_PANEL_VIEW)) {

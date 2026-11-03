@@ -1,7 +1,7 @@
 import { Menu, setIcon, setTooltip } from 'obsidian';
 
 import type { SyncSummary } from '../sync/engine';
-import { lastSynced, type NoteIndicator, statusDescription, statusDetails, statusIcon, statusLabel } from './syncStatus';
+import { lastSynced, type NoteIndicator, statusDescription, statusDetails, statusIcon, statusLabel, statusSpins } from './syncStatus';
 
 export type StatusBarActions = {
     syncNow: () => void;
@@ -71,7 +71,7 @@ export class StatusBar {
 
         const icon = this.element.createSpan({ cls: 'proton-drive-sync-icon' });
         setIcon(icon, statusIcon(summary));
-        if (summary.status === 'syncing') {
+        if (statusSpins(summary)) {
             icon.addClass('proton-drive-sync-spin');
         }
         if (this.note) {

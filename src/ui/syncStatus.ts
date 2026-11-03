@@ -46,6 +46,11 @@ const PRESENTATION: Record<SyncStatus, Presentation> = {
         label: 'Sync locked',
         description: 'Your sign-in is protected with a PIN. Enter it to start syncing.',
     },
+    connecting: {
+        icon: 'refresh-cw',
+        label: 'Connecting',
+        description: 'Signing in to Proton and getting ready to sync.',
+    },
     'waiting-for-wifi': {
         icon: 'wifi-off',
         label: 'Waiting for Wi-Fi',
@@ -109,6 +114,11 @@ export function noteIndicator(state: NoteSyncState, change: PendingChange | unde
 
 /** Longest file name shown in a label before it is shortened. */
 const MAX_NAME_LENGTH = 24;
+
+/** Whether the status icon spins: while something is under way the user is waiting on. */
+export function statusSpins(summary: SyncSummary): boolean {
+    return summary.status === 'syncing' || summary.status === 'connecting';
+}
 
 /**
  * The icon for the current state. Being locked outranks everything, since
