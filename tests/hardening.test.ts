@@ -57,7 +57,7 @@ describe('permissions: who else can write what the plugin trusts', () => {
     }
 
     const app = (base: string) =>
-        ({ vault: { adapter: { getBasePath: () => base } } }) as never;
+        ({ vault: { configDir: '.obsidian', adapter: { getBasePath: () => base } } }) as never;
 
     it('reports a world-writable plugin folder: whoever writes it runs code', () => {
         (globalThis as unknown as { window: unknown }).window = undefined;

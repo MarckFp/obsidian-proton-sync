@@ -156,6 +156,25 @@ That closes the last open question from the earlier measurement: on a machine
 where the OS can encrypt, the plugin uses the encrypted file and leaves nothing
 readable behind, and sync still works.
 
+
+## The metadata cache
+
+The SDK keeps the names, sizes and revisions it has loaded in IndexedDB between
+starts, encrypted with a key that lives inside the session. That is what makes a
+restart cheap — measured on the test vault: a warm start takes 10 s, the same
+start without the cache 19 s, and the gap grows with the number of folders.
+
+It also held names the vault does not have on disk: folders browsed while
+choosing where the vault would live. Those entries are now dropped at write time
+(`persistentCache.nodeScope`): the cache keeps entries keyed by nodes the sync
+state knows, and entries that carry no names at all (shares, volumes, keys).
+In-memory behaviour is unchanged; only what survives a restart is filtered.
+
+Clearing the cache is no longer a security measure — whoever can read it can
+read the session it is keyed from — so it is a button ("Clear cached Drive
+metadata") for the cases where a rebuild is wanted, not something that happens
+on lock.
+
 ## Not done yet
 
 

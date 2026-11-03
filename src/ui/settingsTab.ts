@@ -613,6 +613,24 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                     },
                 },
                 {
+                    name: 'Clear cached Drive metadata',
+                    desc:
+                        'The plugin keeps the names and sizes of synced files between starts, encrypted with the ' +
+                        'session, so a start does not ask Drive for them again. Clearing it costs one full walk of ' +
+                        'the folder on the next sync.',
+                    render: (setting) =>
+                        setting.addButton((button) =>
+                            button.setButtonText('Clear').onClick(async () => {
+                                await getRuntime().session.clearCache();
+                                new Notice(
+                                    'Cached Drive metadata cleared. The next sync walks the folder again, which takes longer.',
+                                    10000,
+                                );
+                                this.update();
+                            }),
+                        ),
+                },
+                {
                     name: 'Attempts to reach the sign-in',
                     desc:
                         'Every call another plugin makes to the Proton secret storage, and every look for a credentials ' +

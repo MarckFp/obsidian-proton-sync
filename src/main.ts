@@ -264,6 +264,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             protonLogger,
         );
         runtime.session = new ProtonSession(credentials, clientUid, protonLogger, () => runtime.state.cursorsFingerprint());
+        // The metadata cache keeps only nodes the vault syncs; see security/capability.ts
+        // and persistentCache.nodeScope.
+        runtime.session.setNodeSource(() => new Set(runtime.state.entries().map((record) => record.nodeUid)));
         runtime.state = new SyncState(
             this.app.vault.adapter,
             this.pluginFile(STATE_FILE),

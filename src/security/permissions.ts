@@ -49,7 +49,7 @@ export function checkPermissions(app: App, pluginDir: string): PermissionFinding
         { path: absolute(pluginDir), what: 'the plugin folder' },
         { path: absolute(`${pluginDir}/main.js`), what: 'this plugin\'s own code' },
         { path: absolute(`${pluginDir}/session.bin`), what: 'the stored sign-in' },
-        { path: absolute('.obsidian'), what: 'the config folder' },
+        { path: absolute(app.vault.configDir), what: 'the config folder' },
     ];
     for (const target of targets) {
         const stats = statOf(target.path);

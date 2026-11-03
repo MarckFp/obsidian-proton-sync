@@ -53,6 +53,17 @@ export class EncryptedEntitiesCache implements ProtonDriveCache<string> {
         private readonly marker: () => string,
         private readonly logger: Logger,
         private loadedMarker: string | null,
+        /**
+         * Which entries may be written to disk.
+         *
+         * The SDK caches whatever it has loaded, which includes folders outside
+         * the synced one — names the user browsed while choosing where the vault
+         * lives. Those are the only entries the vault does not already have on
+         * disk, so they are the only ones worth not keeping: everything inside
+         * the synced folder is a note the user has anyway. In-memory behaviour
+         * is unchanged; only what survives a restart is filtered.
+         */
+        private readonly inScope?: (key: string, tags: string[]) => boolean,
     ) {}
 
     /**
@@ -64,6 +75,8 @@ export class EncryptedEntitiesCache implements ProtonDriveCache<string> {
         rawKey: Uint8Array<ArrayBuffer>,
         marker: () => string,
         logger: Logger,
+        /** Which entries are worth keeping on disk; see {@link EncryptedEntitiesCache.inScope}. */
+        inScope?: (key: string, tags: string[]) => boolean,
     ): Promise<EncryptedEntitiesCache> {
         const key = await crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
         let loaded: { entries: StoredEntry[]; marker: string | null } = { entries: [], marker: null };
@@ -72,7 +85,7 @@ export class EncryptedEntitiesCache implements ProtonDriveCache<string> {
         } catch (error) {
             logger.warn('Could not read the saved Drive cache; starting without it', error);
         }
-        const cache = new EncryptedEntitiesCache(store, key, marker, logger, loaded.marker);
+        const cache = new EncryptedEntitiesCache(store, key, marker, logger, loaded.marker, inScope);
         try {
             for (const entry of loaded.entries) {
                 const value = await decrypt(key, entry);
@@ -123,6 +136,11 @@ export class EncryptedEntitiesCache implements ProtonDriveCache<string> {
         await this.memory.setEntity(key, value, tags);
         this.tags.set(key, tags);
         this.removed.delete(key);
+        if (this.inScope && !this.inScope(key, tags)) {
+            // Readable in this session, not worth keeping between them.
+            this.dirty.delete(key);
+            return;
+        }
         this.dirty.add(key);
         this.scheduleFlush();
     }
@@ -312,4 +330,29 @@ function fromBase64(text: string): Uint8Array<ArrayBuffer> {
         bytes[i] = binary.charCodeAt(i);
     }
     return bytes;
+}
+
+/**
+ * Which cache entries describe a node the vault actually syncs.
+ *
+ * Everything else the SDK caches is either keyed by something that carries no
+ * names (shares, volumes, keys) or is a node outside the synced folder — the
+ * ones the user browsed while choosing where the vault would live. The vault
+ * already holds every name inside it, so only those are worth keeping.
+ */
+const NODE_KEY = /~[A-Za-z0-9_=-]{16,}$/;
+
+export function nodeScope(nodes: () => Set<string>): (key: string) => boolean {
+    return (key: string): boolean => {
+        if (!NODE_KEY.test(key)) {
+            return true;
+        }
+        const known = nodes();
+        if (known.size === 0) {
+            // Nothing reconciled yet: do not throw away a cache that is merely
+            // being rebuilt from.
+            return true;
+        }
+        return known.has(key);
+    };
 }

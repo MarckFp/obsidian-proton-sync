@@ -11,7 +11,7 @@ import type { Logger } from '../util/logger';
 import { ApiClient, initAccount, type Addresses, type Auth, type Srp } from './account';
 import type { Credentials } from './credentials';
 import { HTTPClient } from './httpClient';
-import { cacheKeyBytes, EncryptedEntitiesCache, IndexedDbCacheStore } from './persistentCache';
+import { cacheKeyBytes, EncryptedEntitiesCache, IndexedDbCacheStore, nodeScope } from './persistentCache';
 import { revokeSession } from './revoke';
 import { obsidianFetch } from './obsidianFetch';
 import { Telemetry } from './telemetry';
@@ -72,8 +72,37 @@ export class ProtonSession {
     private addresses: Addresses | null = null;
     private srp: Srp | null = null;
     private client: ProtonDriveClient | null = null;
+    /**
+     * Tell the session which node uids the vault syncs, so the saved metadata
+     * cache keeps only entries the vault does not already have on disk (see
+     * `nodeScope`). Recomputed at most once a minute: it is consulted per write.
+     */
+    setNodeSource(source: (() => Set<string>) | null): void {
+        this.nodeSource = source;
+        this.knownNodes = new Set();
+        this.knownNodesAt = 0;
+    }
+
+    private scopeNodes(): Set<string> {
+        const now = Date.now();
+        if (this.nodeSource && now - this.knownNodesAt > 60_000) {
+            try {
+                this.knownNodes = this.nodeSource();
+                this.knownNodesAt = now;
+            } catch {
+                // Keep the last known set rather than dropping the cache.
+            }
+        }
+        return this.knownNodes;
+    }
+
     /** The SDK's metadata cache, saved between sessions; see {@link EncryptedEntitiesCache}. */
     private entitiesCache: EncryptedEntitiesCache | null = null;
+    /** Node uids the vault syncs; see `nodeScope`. Recomputed at most once a minute. */
+    private knownNodes: Set<string> = new Set();
+    private knownNodesAt = 0;
+    /** Where {@link knownNodes} comes from; set by the plugin once a state exists. */
+    private nodeSource: (() => Set<string>) | null = null;
 
     constructor(
         private readonly credentials: Credentials,
@@ -284,6 +313,7 @@ export class ProtonSession {
                 cacheKeyBytes(key),
                 this.cacheMarker,
                 this.logger.getLogger('cache'),
+                nodeScope(() => this.scopeNodes()),
             );
             return this.entitiesCache;
         } catch (error) {
