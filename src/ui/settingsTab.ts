@@ -1,4 +1,4 @@
-import { App, debounce, Notice, Platform, PluginSettingTab, type SettingDefinitionItem } from 'obsidian';
+import { App, debounce, Notice, Platform, PluginSettingTab, type Setting, type SettingDefinitionItem } from 'obsidian';
 
 import type ProtonDriveSyncPlugin from '../main';
 import { MIN_POLL_SECONDS } from '../settings';
@@ -585,7 +585,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                         'Whoever can replace main.js runs code with your keyring, so the code is checked against what ' +
                         'was installed, and the vault permissions are reported.',
                     render: (setting) => {
-                        const box = setting.settingEl.createDiv({ cls: 'proton-drive-sync-integrity' });
+                        const box = this.statusBox(setting);
                         const integrity = getRuntime().selfIntegrity;
                         const words: Record<string, string> = {
                             'first-run': 'Recorded on this start.',
@@ -637,7 +637,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                         'field on this plugin, is recorded here with the plugin it came from.',
                     render: (setting) => {
                         const hits = getRuntime().tripwire?.hits ?? [];
-                        const box = setting.settingEl.createDiv({ cls: 'proton-drive-sync-tripwire' });
+                        const box = this.statusBox(setting);
                         if (hits.length === 0) {
                             box.setText('Nothing has reached for the sign-in since this start.');
                             return;
@@ -659,27 +659,47 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                             button.setButtonText('Rescan').onClick(() => void this.plugin.scanOtherPlugins()),
                         );
                         const report = getRuntime().pluginWatch;
-                        const box = setting.settingEl.createDiv({ cls: 'proton-drive-sync-plugin-watch' });
+                        const box = this.statusBox(setting);
                         if (!report) {
                             box.setText('Nothing scanned yet.');
                             return;
                         }
-                        const head = report.baseline
-                            ? `${report.plugins.length} plugin(s) recorded as the starting point.`
-                            : `${report.plugins.length} plugin(s); ${report.changes.length} change(s) since the last start.`;
+                        const head =
+                            report.plugins.length === 0
+                                ? 'No other plugins are installed in this vault.'
+                                : report.baseline
+                                  ? `${report.plugins.length} other plugin(s), recorded as the starting point.`
+                                  : `${report.plugins.length} other plugin(s), ${report.changes.length} change(s) since the last start.`;
                         box.createEl('p', { text: head });
                         for (const change of report.changes) {
                             const line = change.kind === 'added' ? 'new' : change.kind === 'removed' ? 'removed' : 'changed';
                             box.createEl('p', { text: `• ${change.name} — ${line} (${change.detail})` });
                         }
-                        for (const plugin of report.plugins) {
-                            const tag = plugin.digest ? plugin.digest.slice(0, 8) : 'unreadable';
-                            box.createEl('p', { text: `• ${plugin.name} ${plugin.version} — ${tag}` });
+                        if (report.plugins.length > 0) {
+                            const details = box.createEl('details');
+                            details.createEl('summary', { text: `All ${report.plugins.length} plugin(s)` });
+                            for (const plugin of report.plugins) {
+                                const tag = plugin.digest ? plugin.digest.slice(0, 8) : 'unreadable';
+                                details.createEl('p', { text: `• ${plugin.name} ${plugin.version} — ${tag}` });
+                            }
                         }
                     },
                 },
             ],
         };
+    }
+
+    /**
+     * A place for a status block inside the description column.
+     *
+     * Obsidian re-renders settings items: appending to the row adds another box
+     * each time (and squeezes it into the control column, which is one narrow
+     * cell). So the block lives in the description and the previous one is
+     * removed first.
+     */
+    private statusBox(setting: Setting): HTMLElement {
+        setting.descEl.querySelectorAll(':scope > .proton-drive-sync-status').forEach((el) => el.remove());
+        return setting.descEl.createDiv({ cls: 'proton-drive-sync-status' });
     }
 
     private logGroup(): SettingDefinitionItem {

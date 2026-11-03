@@ -39,6 +39,21 @@ export class ObsidianSecretSlot implements SecretSlot {
     }
 }
 
+/**
+ * Node's `fs`, on desktop only.
+ *
+ * Obsidian writes through its adapter, which creates files with the process
+ * umask (0644 on most systems). A session file that any local user can read is
+ * a finding the plugin reports itself, so it is also fixed where it is created.
+ */
+function nodeFs(): typeof import('node:fs') | null {
+    try {
+        return (window.require('node:fs') as typeof import('node:fs')) ?? null;
+    } catch {
+        return null;
+    }
+}
+
 type SafeStorage = {
     isEncryptionAvailable(): boolean;
     decryptString(encrypted: Buffer): string;
@@ -99,7 +114,12 @@ export class SafeStorageFileSlot implements SecretSlot {
         }
         try {
             const encoded = await this.adapter.read(this.path);
-            return this.safeStorage.decryptString(Buffer.from(encoded, 'base64')) || null;
+            const value = this.safeStorage.decryptString(Buffer.from(encoded, 'base64')) || null;
+            if (value !== null) {
+                // Heal a file an older version wrote readable by everyone.
+                this.closeToOthers();
+            }
+            return value;
         } catch {
             // A different OS user, a reinstalled keychain, or a corrupted file:
             // the secret is unreadable, and saying so is better than throwing
@@ -116,6 +136,21 @@ export class SafeStorageFileSlot implements SecretSlot {
             return;
         }
         await this.adapter.write(this.path, this.safeStorage.encryptString(value).toString('base64'));
+        this.closeToOthers();
+    }
+
+    /** Make an existing file private, in case an older version wrote it 0644. */
+    closeToOthers(): void {
+        const fs = nodeFs();
+        if (!fs) {
+            return;
+        }
+        try {
+            fs.chmodSync(this.path, 0o600);
+        } catch {
+            // Best effort: a filesystem without modes, or a path the app cannot
+            // reach from Node. The permission check reports what it sees.
+        }
     }
 }
 

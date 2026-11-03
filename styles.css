@@ -601,3 +601,31 @@ button.proton-drive-sync-version:hover {
     font-family: var(--font-monospace);
     font-size: var(--font-ui-small);
 }
+
+/* Status blocks inside a setting's description: full width of the text column,
+   small type, and no stray margins between the lines. */
+.proton-drive-sync-status {
+    margin: 0.35em 0 0;
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+
+.proton-drive-sync-status p {
+    margin: 0.15em 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.proton-drive-sync-status details {
+    margin-top: 0.3em;
+}
+
+.proton-drive-sync-status summary {
+    cursor: pointer;
+    color: var(--text-faint);
+}
+
+.proton-drive-sync-status details p {
+    padding-left: 1em;
+}
