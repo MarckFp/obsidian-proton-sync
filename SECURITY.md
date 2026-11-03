@@ -76,22 +76,33 @@ vault, same machine:
 
 ## Watching the other plugins
 
-Every plugin in the vault can read the vault and this plugin's sign-in, so the
-set of installed plugins is part of the security model. At each start the plugin
-fingerprints the others — a sha-256 of each `main.js`, not only the version a
-plugin writes about itself — compares it with the previous start, and reports
-what is new, changed or gone, in a notice and in Settings → Proton Drive Sync →
-Security. `watchOtherPlugins` turns it off.
+An update is announced by Obsidian, with a changelog, so repeating "plugin X
+changed" says nothing the user does not already know. Two things an update
+notice never says are kept:
+
+- **the same version with different code** — an update does not produce that, so
+  it means the bundle was replaced some other way;
+- **an update whose code starts mentioning credential APIs it did not mention
+  before** (`secretStorage`, `safeStorage`, `plugins.plugins`, this plugin's id)
+  — which is what "this plugin can now read the sign-in" looks like from the
+  outside.
+
+Versions, additions and removals are still recorded (sha-256 of each `main.js`,
+not the version a plugin writes about itself) and folded away in Settings →
+Proton Drive Sync → Security; only the two cases above raise a notice.
+`watchOtherPlugins` turns it off.
 
 It is **tamper-evident, not tamper-proof**: a hostile plugin shares the process
-and could rewrite the record. It covers the realistic cases — a plugin you
-installed once updates itself, or a new one appears — instead of those happening
-in silence.
+and could rewrite the record. It is also name-based — a bundle that reaches for
+the secret storage through a reference saved earlier will not mention the name.
 
-Measured: appending a line to another plugin's `main.js` and restarting produced
-`Attacker Probe (code changed) changed since the last start. Any plugin here can
-read this vault and the Proton sign-in — check Settings → Community plugins.`,
-and the settings section listed the change with the new fingerprint.
+Measured on the rig, all three cases:
+
+| Change made to another plugin | Result |
+| --- | --- |
+| a line appended, version untouched | `Attacker Probe — same version 1.0.0, different code — an update does not do that` |
+| `1.2.0 → 1.3.0`, ordinary code | no notice; `3 other plugin(s); nothing since the last start that Obsidian would not already tell you`, update listed under a fold |
+| `1.0.0 → 1.2.0` with a `secretStorage` reference added | `Share Probe — 1.0.0 → 1.2.0 now mentions secretStorage` |
 
 
 ## Capability, not only credentials
