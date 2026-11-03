@@ -3,6 +3,7 @@
 // load time.
 import './polyfills';
 
+import { getRuntime } from './runtime';
 import {
     apiVersion,
     type App,
@@ -20,7 +21,14 @@ import {
 import { Credentials } from './proton/credentials';
 import { PinProtectedSlot, RememberedUnlock } from './proton/pinLock';
 import { ConflictHistory } from './sync/conflictHistory';
-import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
+import {
+    decryptLegacySession,
+    encryptedStorage,
+    migrateSecret,
+    ObsidianSecretSlot,
+    SafeStorageFileSlot,
+    type SecretSlot,
+} from './proton/secretStore';
 import { ProtonSession } from './proton/session';
 import { DEFAULT_SETTINGS, type PluginSettings } from './settings';
 import { FolderPickerModal, type ChosenFolder } from './ui/folderPickerModal';
@@ -29,7 +37,7 @@ import { DriveIO, sharedWithOthers } from './sync/drive';
 import { SyncEngine, type ConflictEvent, type OpenEditor, type SyncPlan, type SyncSummary } from './sync/engine';
 import { errorMessage } from './sync/engine/helpers';
 import { SyncState } from './sync/state';
-import { formatLogEntries, Logger } from './util/logger';
+import { formatLogEntries, Logger, setLogShowsNames } from './util/logger';
 import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor, versionComparison } from './ui/compare';
 import { showConflictNotice } from './ui/conflictNotice';
 import { ConflictsModal } from './ui/conflictsModal';
@@ -44,9 +52,16 @@ import { StatusBar } from './ui/statusBar';
 import { SYNC_PANEL_VIEW, SyncPanelView } from './ui/syncPanel';
 import { type NoteIndicator, noteIndicator, statusIcon, statusLabel, statusSpins } from './ui/syncStatus';
 
+/** The plugin's own handles; see runtime.ts for why they are not on the instance. */
+const runtime = getRuntime();
+
 /** Where 0.1.0 kept the session; migrated into secret storage on first load. */
 const LEGACY_SESSION_FILE = 'session.json';
 const STATE_FILE = 'sync-state.json';
+/** The session, encrypted by the OS keystore; never in the vault's plain sight or in secret storage. */
+const SESSION_SECRET_FILE = 'session.bin';
+/** The PIN-unlock material, same treatment. */
+const UNLOCK_SECRET_FILE = 'unlock.bin';
 const CONFLICT_HISTORY_FILE = 'conflict-history.json';
 /** Local-storage key for the installation id; see {@link ProtonDriveSyncPlugin.installationId}. */
 const CLIENT_UID_KEY = 'proton-drive-sync-client-uid';
@@ -92,15 +107,13 @@ function networkConnection(): NetworkConnection | undefined {
     return (navigator as Navigator & { connection?: NetworkConnection }).connection;
 }
 
+
+
+
 export default class ProtonDriveSyncPlugin extends Plugin {
     // Obsidian declares `settings?: unknown` on Plugin; this narrows it.
     declare settings: PluginSettings;
-    logger!: Logger;
-    session!: ProtonSession;
-    state!: SyncState;
-    conflictHistory!: ConflictHistory;
     /** Where the Proton session is kept, encrypted with the user's PIN if they set one. */
-    sessionSlot!: PinProtectedSlot;
     /** The stored session is PIN-protected and has not been unlocked in this run. */
     locked = false;
     /** Whether a PIN protects the stored session; cached for the settings tab, which renders synchronously. */
@@ -116,11 +129,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     private settingsTab: ProtonDriveSyncSettingsTab | null = null;
     /** What the settings tab last rendered from; see {@link refreshSettingsTab}. */
     private settingsTabKey = '';
-    engine!: SyncEngine;
     /** This device's place in the vault's device list; see {@link DeviceList}. */
-    devices!: DeviceList;
     /** This installation's id: the SDK's client id, and the device's id on the device list. */
-    private clientUid!: string;
     /** The device list is off because the vault is shared with other people; see {@link openDeviceList}. */
     private devicesOffForSharing = false;
 
@@ -131,13 +141,13 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     private readonly noteActions = new WeakMap<MarkdownView, HTMLElement>();
     /** What the status bar, ribbon icon and panel currently show. */
     private summary!: SyncSummary;
-    private pendingConflicts: ConflictEvent[] = [];
     private conflictNoticeTimer: number | null = null;
 
     override async onload(): Promise<void> {
         await this.loadSettings();
 
-        this.logger = new Logger(this.settings.logLevel);
+        runtime.logger = new Logger(this.settings.logLevel);
+        setLogShowsNames(this.settings.logShowsNames ?? false);
         this.statusBar = new StatusBar(this.addStatusBarItem(), {
             syncNow: () => void this.syncNowOrSetUp(),
             togglePause: () => void this.setPaused(!this.settings.paused),
@@ -150,19 +160,19 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             (leaf) =>
                 new SyncPanelView(leaf, {
                     summary: () => this.summary,
-                    pendingChanges: () => this.engine.pendingChanges(),
+                    pendingChanges: () => runtime.engine.pendingChanges(),
                     activeNote: () => this.app.workspace.getActiveFile()?.path ?? null,
-                    canListVersions: () => this.isConfigured() && !this.locked && this.engine.isConnected(),
-                    versionsKey: (path) => this.engine.versionsKey(path),
-                    noteVersions: (path) => this.engine.noteVersions(path),
+                    canListVersions: () => this.isConfigured() && !this.locked && runtime.engine.isConnected(),
+                    versionsKey: (path) => runtime.engine.versionsKey(path),
+                    noteVersions: (path) => runtime.engine.noteVersions(path),
                     compareVersion: (path, version) => versionComparison(this, path, version),
                     shareNote: (path) => this.shareNote(path),
-                    recentlyDeleted: () => this.engine.recentlyDeleted(),
+                    recentlyDeleted: () => runtime.engine.recentlyDeleted(),
                     restoreDeleted: async (item) => {
-                        await this.engine.restoreDeleted(item);
+                        await runtime.engine.restoreDeleted(item);
                         new Notice(`Restored "${item.path}"; it is back in the vault after the next check.`);
                     },
-                    pollSeconds: () => this.engine.pollSeconds(),
+                    pollSeconds: () => runtime.engine.pollSeconds(),
                     sharedBy: () => this.settings.remoteFolderSharedBy,
                     openFile: (path) => void this.app.workspace.openLinkText(path, '', false),
                     syncNow: () => void this.syncNowOrSetUp(),
@@ -186,16 +196,34 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         );
 
         const clientUid = this.installationId();
-        this.clientUid = clientUid;
-        const protonLogger = this.logger.getLogger('proton');
-        this.sessionSlot = new PinProtectedSlot(
-            new ObsidianSecretSlot(this.app.secretStorage, `proton-drive-sync-session-${clientUid}`),
+        runtime.clientUid = clientUid;
+        const protonLogger = runtime.logger.getLogger('proton');
+        // The session goes into an encrypted file of our own when the OS can
+        // encrypt at all, so that it is not sitting in the one namespace every
+        // other plugin can read; Obsidian's secret storage stays the home on
+        // mobile, where there is no keystore and no Node. See SECURITY.md.
+        const safeStorage = encryptedStorage(protonLogger);
+        const legacySession = new ObsidianSecretSlot(
+            this.app.secretStorage,
+            `proton-drive-sync-session-${clientUid}`,
         );
-        this.rememberedUnlock = new RememberedUnlock(
-            new ObsidianSecretSlot(this.app.secretStorage, `proton-drive-sync-unlock-${clientUid}`),
-        );
+        const legacyUnlock = new ObsidianSecretSlot(this.app.secretStorage, `proton-drive-sync-unlock-${clientUid}`);
+        const sessionInner: SecretSlot = safeStorage
+            ? new SafeStorageFileSlot(this.app.vault.adapter, this.pluginFile(SESSION_SECRET_FILE), safeStorage)
+            : legacySession;
+        const unlockInner: SecretSlot = safeStorage
+            ? new SafeStorageFileSlot(this.app.vault.adapter, this.pluginFile(UNLOCK_SECRET_FILE), safeStorage)
+            : legacyUnlock;
+        if (safeStorage) {
+            // Upgrading: move what an older version left in secret storage, so
+            // nobody is signed out and the old, readable copy goes away.
+            await migrateSecret(legacySession, sessionInner);
+            await migrateSecret(legacyUnlock, unlockInner);
+        }
+        runtime.sessionSlot = new PinProtectedSlot(sessionInner);
+        this.rememberedUnlock = new RememberedUnlock(unlockInner);
         const credentials = new Credentials(
-            this.sessionSlot,
+            runtime.sessionSlot,
             {
                 adapter: this.app.vault.adapter,
                 path: this.pluginFile(LEGACY_SESSION_FILE),
@@ -203,26 +231,26 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             },
             protonLogger,
         );
-        this.session = new ProtonSession(credentials, clientUid, protonLogger, () => this.state.cursorsFingerprint());
-        this.state = new SyncState(
+        runtime.session = new ProtonSession(credentials, clientUid, protonLogger, () => runtime.state.cursorsFingerprint());
+        runtime.state = new SyncState(
             this.app.vault.adapter,
             this.pluginFile(STATE_FILE),
-            this.logger.getLogger('state'),
+            runtime.logger.getLogger('state'),
             // The Drive cache is only valid at the event position it was saved
             // at, so it is saved whenever the state, and its cursor, are.
-            () => void this.session.flushCache(),
+            () => void runtime.session.flushCache(),
         );
-        this.conflictHistory = new ConflictHistory(
+        runtime.conflictHistory = new ConflictHistory(
             this.app.vault.adapter,
             this.pluginFile(CONFLICT_HISTORY_FILE),
-            this.logger.getLogger('conflicts'),
+            runtime.logger.getLogger('conflicts'),
         );
-        await this.conflictHistory.load();
-        this.engine = new SyncEngine(
+        await runtime.conflictHistory.load();
+        runtime.engine = new SyncEngine(
             this.app,
-            this.state,
+            runtime.state,
             this.settings,
-            this.logger.getLogger('sync'),
+            runtime.logger.getLogger('sync'),
             {
                 onChange: (summary) => this.onSyncChange(summary),
                 onConflict: (event) => this.onConflict(event),
@@ -239,24 +267,24 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             },
         );
 
-        this.devices = new DeviceList(
+        runtime.devices = new DeviceList(
             {
                 self: () => ({
-                    id: this.clientUid,
+                    id: runtime.clientUid,
                     name: this.settings.deviceName,
                     platform: platformName(),
                     pluginVersion: this.manifest.version,
-                    account: this.session.accountEmail ?? null,
+                    account: runtime.session.accountEmail ?? null,
                 }),
                 handled: () => Number(this.app.loadLocalStorage(HANDLED_REQUEST_KEY)) || 0,
                 setHandled: (at) => this.app.saveLocalStorage(HANDLED_REQUEST_KEY, at),
             },
-            this.logger.getLogger('devices'),
+            runtime.logger.getLogger('devices'),
         );
 
         // Until connect() says otherwise: a stored sign-in is being restored,
         // which can take a few seconds, and "Sign in" would be wrong meanwhile.
-        this.summary = { ...this.engine.getSummary(), status: 'connecting' };
+        this.summary = { ...runtime.engine.getSummary(), status: 'connecting' };
         this.settingsTab = new ProtonDriveSyncSettingsTab(this.app, this);
         this.addSettingTab(this.settingsTab);
         this.registerCommands();
@@ -281,8 +309,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         }
         // Obsidian does not wait for unload, so there is nothing to hand the
         // promise to; `stop` cancels timers synchronously before it awaits.
-        void this.engine.stop();
-        this.devices.open(null);
+        void runtime.engine.stop();
+        runtime.devices.open(null);
         void this.rememberUnlock();
     }
 
@@ -316,9 +344,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             // The sync state describes the old folder, and reconciling against
             // a different tree with it would read as mass deletions on both
             // sides.
-            await this.engine.stop();
-            await this.state.reset();
-            await this.session.clearCache();
+            await runtime.engine.stop();
+            await runtime.state.reset();
+            await runtime.session.clearCache();
         }
         if (options.connect ?? true) {
             await this.reconnect();
@@ -326,14 +354,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     isConfigured(): boolean {
-        return this.session.isSignedIn() && Boolean(this.settings.remoteFolderUid);
+        return runtime.session.isSignedIn() && Boolean(this.settings.remoteFolderUid);
     }
 
     /** Forget the sync state and compare everything afresh. Stops first, so no pass writes into the cleared state. */
     async rebuildState(): Promise<void> {
-        await this.engine.stop();
-        await this.state.reset();
-        await this.session.clearCache();
+        await runtime.engine.stop();
+        await runtime.state.reset();
+        await runtime.session.clearCache();
         await this.connect();
     }
 
@@ -352,21 +380,21 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.settings.paused = paused;
         await this.saveSettings();
         if (paused) {
-            this.engine.pause();
+            runtime.engine.pause();
             this.notify(request ? requestNotice(request) : 'syncing paused.');
             return;
         }
         if (
             this.isConfigured() &&
-            this.state.paths().length === 0 &&
-            !(await this.confirmFirstSync(this.state.wasLost()))
+            runtime.state.paths().length === 0 &&
+            !(await this.confirmFirstSync(runtime.state.wasLost()))
         ) {
             this.settings.paused = true;
             await this.saveSettings();
             return;
         }
         this.notify(request ? requestNotice(request) : 'syncing resumed.');
-        await this.engine.resume();
+        await runtime.engine.resume();
     }
 
     // -- PIN ---------------------------------------------------------------
@@ -379,8 +407,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     private unlock(): Promise<boolean> {
         this.unlocking ??= new Promise<boolean>((resolve) => {
             new UnlockModal(this.app, {
-                verify: (pin) => this.sessionSlot.unlock(pin),
-                forget: () => this.sessionSlot.forget(),
+                verify: (pin) => runtime.sessionSlot.unlock(pin),
+                forget: () => runtime.sessionSlot.forget(),
                 failures: this.pinFailures,
                 onDone: (result) => {
                     if (result === 'unlocked') {
@@ -391,7 +419,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                         this.locked = false;
                         this.pinEnabled = false;
                         void this.rememberedUnlock.clear();
-                        this.showStatus({ ...this.engine.getSummary(), status: 'signed-out' });
+                        this.showStatus({ ...runtime.engine.getSummary(), status: 'signed-out' });
                         this.notify('the locked sign-in was deleted. Sign in again to keep syncing.');
                     }
                     resolve(result === 'unlocked');
@@ -407,12 +435,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     managePin(mode: 'set' | 'change' | 'remove', onDone?: () => void): void {
         new PinFormModal(this.app, {
             mode,
-            verify: (pin) => this.sessionSlot.verify(pin),
+            verify: (pin) => runtime.sessionSlot.verify(pin),
             apply: async (newPin) => {
                 if (mode === 'remove') {
-                    await this.sessionSlot.removePin();
+                    await runtime.sessionSlot.removePin();
                 } else if (newPin !== null) {
-                    await this.sessionSlot.setPin(newPin);
+                    await runtime.sessionSlot.setPin(newPin);
                 }
                 this.pinEnabled = mode !== 'remove';
                 this.markActive();
@@ -448,7 +476,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             minutes > 0 &&
             this.pinEnabled &&
             !this.locked &&
-            this.session.isSignedIn() &&
+            runtime.session.isSignedIn() &&
             Date.now() - this.lastActivity >= minutes * 60_000
         );
     }
@@ -472,7 +500,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      */
     private async rememberUnlock(): Promise<void> {
         const minutes = this.settings.pinLockAfterMinutes;
-        const key = this.sessionSlot.exportKey();
+        const key = runtime.sessionSlot.exportKey();
         if (minutes <= 0 || !this.pinEnabled || this.locked || key === null) {
             await this.rememberedUnlock.clear();
             return;
@@ -491,13 +519,13 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             return;
         }
         this.locked = true;
-        this.logger.info(`Locked after ${this.settings.pinLockAfterMinutes} minute(s) away`);
-        await this.engine.stop();
+        runtime.logger.info(`Locked after ${this.settings.pinLockAfterMinutes} minute(s) away`);
+        await runtime.engine.stop();
         this.closeDeviceList();
-        this.session.lock();
-        this.sessionSlot.lock();
+        runtime.session.lock();
+        runtime.sessionSlot.lock();
         await this.rememberedUnlock.clear();
-        this.showStatus({ ...this.engine.getSummary(), status: 'locked' });
+        this.showStatus({ ...runtime.engine.getSummary(), status: 'locked' });
         await this.connect();
     }
 
@@ -510,7 +538,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             new PinFormModal(this.app, {
                 mode: 'confirm',
                 purpose,
-                verify: (pin) => this.sessionSlot.verify(pin),
+                verify: (pin) => runtime.sessionSlot.verify(pin),
                 apply: async () => undefined,
                 onDone: resolve,
             }).open();
@@ -544,16 +572,16 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * first sync, which pairs up files that already match.
      */
     private async endSession(): Promise<boolean> {
-        await this.engine.stop();
+        await runtime.engine.stop();
         this.closeDeviceList();
-        const { revoked } = await this.session.signOut();
+        const { revoked } = await runtime.session.signOut();
         this.pinEnabled = false;
         await this.rememberedUnlock.clear();
         this.settings.remoteFolderUid = null;
         this.settings.remoteFolderPath = null;
         this.settings.remoteFolderSharedBy = null;
         await this.saveSettings();
-        await this.state.reset();
+        await runtime.state.reset();
         this.refreshSettingsTab();
         return revoked;
     }
@@ -563,10 +591,10 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         const header = [
             `Proton Drive Sync ${this.manifest.version}`,
             `Obsidian ${apiVersion}, ${Platform.isMobileApp ? 'mobile' : 'desktop'}`,
-            `Status: ${this.engine.getSummary().status}`,
+            `Status: ${runtime.engine.getSummary().status}`,
             '',
         ];
-        await navigator.clipboard.writeText(header.join('\n') + formatLogEntries(this.logger.getEntries()));
+        await navigator.clipboard.writeText(header.join('\n') + formatLogEntries(runtime.logger.getEntries()));
         new Notice('Sync log copied. It lists file names; check it before sharing.');
     }
 
@@ -586,53 +614,53 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         } catch (error) {
             // Nothing above expects to fail; without this the status would
             // keep saying "Connecting".
-            this.logger.error('Could not start syncing', error);
-            this.showStatus({ ...this.engine.getSummary(), status: 'error', lastError: errorMessage(error) });
+            runtime.logger.error('Could not start syncing', error);
+            this.showStatus({ ...runtime.engine.getSummary(), status: 'error', lastError: errorMessage(error) });
         }
     }
 
     private async connectSession(): Promise<void> {
-        this.pinEnabled = (await this.sessionSlot.protection()) === 'pin';
-        this.locked = await this.sessionSlot.isLocked();
+        this.pinEnabled = (await runtime.sessionSlot.protection()) === 'pin';
+        this.locked = await runtime.sessionSlot.isLocked();
         if (this.locked && this.settings.pinLockAfterMinutes > 0) {
             // Unlocked within the time limit before Obsidian last closed.
             const remembered = await this.rememberedUnlock.load();
-            if (remembered !== null && (await this.sessionSlot.unlockWithKey(remembered))) {
+            if (remembered !== null && (await runtime.sessionSlot.unlockWithKey(remembered))) {
                 this.locked = false;
                 this.markActive();
             }
         }
         if (this.locked) {
-            this.showStatus({ ...this.engine.getSummary(), status: 'locked' });
+            this.showStatus({ ...runtime.engine.getSummary(), status: 'locked' });
             if (!(await this.unlock())) {
                 return;
             }
         }
-        this.showStatus({ ...this.engine.getSummary(), status: 'connecting' });
+        this.showStatus({ ...runtime.engine.getSummary(), status: 'connecting' });
         try {
-            await this.session.init();
+            await runtime.session.init();
         } catch (error) {
-            this.logger.error('Could not restore the Proton session', error);
-            this.showStatus({ ...this.engine.getSummary(), status: 'signed-out' });
+            runtime.logger.error('Could not restore the Proton session', error);
+            this.showStatus({ ...runtime.engine.getSummary(), status: 'signed-out' });
             return;
         }
 
-        if (!this.session.isSignedIn()) {
-            this.showStatus({ ...this.engine.getSummary(), status: 'signed-out' });
+        if (!runtime.session.isSignedIn()) {
+            this.showStatus({ ...runtime.engine.getSummary(), status: 'signed-out' });
             return;
         }
         if (!this.settings.remoteFolderUid) {
-            this.showStatus({ ...this.engine.getSummary(), status: 'not-configured' });
+            this.showStatus({ ...runtime.engine.getSummary(), status: 'not-configured' });
             return;
         }
 
-        await this.state.load(this.session.accountEmail ?? null, this.settings.remoteFolderUid);
-        if (this.state.wasLost() || this.state.paths().length === 0) {
+        await runtime.state.load(runtime.session.accountEmail ?? null, this.settings.remoteFolderUid);
+        if (runtime.state.wasLost() || runtime.state.paths().length === 0) {
             // A sync starting from nothing must not trust anything cached
             // about how Drive used to look.
-            await this.session.clearCache();
+            await runtime.session.clearCache();
         } else {
-            await this.session.validateCache(this.state.cursorsFingerprint());
+            await runtime.session.validateCache(runtime.state.cursorsFingerprint());
         }
         // Before anything syncs: what other devices asked of this one.
         if (!(await this.openDeviceList(this.settings.remoteFolderUid))) {
@@ -640,13 +668,13 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         }
         if (
             !this.settings.paused &&
-            this.state.paths().length === 0 &&
-            !(await this.confirmFirstSync(this.state.wasLost()))
+            runtime.state.paths().length === 0 &&
+            !(await this.confirmFirstSync(runtime.state.wasLost()))
         ) {
             this.settings.paused = true;
             await this.saveSettings();
         }
-        await this.engine.start(this.session.getClient(), this.settings.remoteFolderUid);
+        await runtime.engine.start(runtime.session.getClient(), this.settings.remoteFolderUid);
     }
 
     /**
@@ -667,20 +695,20 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         if (!rootUid) {
             return true;
         }
-        this.showStatus({ ...this.engine.getSummary(), status: 'syncing' });
+        this.showStatus({ ...runtime.engine.getSummary(), status: 'syncing' });
 
         let plan: SyncPlan;
         try {
-            plan = await this.engine.plan(this.session.getClient(), rootUid);
+            plan = await runtime.engine.plan(runtime.session.getClient(), rootUid);
         } catch (error) {
             if (stateLost) {
                 // Without the record of the last sync and without a preview,
                 // going ahead would bring deletions back unseen. Hold off.
-                this.logger.error('Could not preview the sync after the sync state was lost; pausing', error);
+                runtime.logger.error('Could not preview the sync after the sync state was lost; pausing', error);
                 this.notify('the record of the last sync could not be read, so syncing is paused. Resume it to try again.');
                 return false;
             }
-            this.logger.warn('Could not preview the first sync; going ahead, since it deletes nothing', error);
+            runtime.logger.warn('Could not preview the first sync; going ahead, since it deletes nothing', error);
             return true;
         }
         const changes = plan.uploads.length + plan.downloads.length + plan.conflicts.length + plan.removals.length;
@@ -729,16 +757,16 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             this.chooseFolder();
             return;
         }
-        await this.engine.syncNow();
+        await runtime.engine.syncNow();
     }
 
     /** Pick another Drive folder for the vault, as the settings tab does. */
     private chooseFolder(): void {
         new FolderPickerModal(
             this.app,
-            this.session.getClient(),
+            runtime.session.getClient(),
             (folder) => void this.setRemoteFolder(folder),
-            this.logger.getLogger('folder-picker'),
+            runtime.logger.getLogger('folder-picker'),
         ).open();
     }
 
@@ -750,7 +778,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
 
     /** Tear the sync down and bring it back with the current configuration. */
     async reconnect(): Promise<void> {
-        await this.engine.stop();
+        await runtime.engine.stop();
         await this.connect();
     }
 
@@ -765,8 +793,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * devices would otherwise see this one, and could pause or remove it.
      */
     private async openDeviceList(rootUid: string): Promise<boolean> {
-        const client = this.session.getClient();
-        const logger = this.logger.getLogger('devices');
+        const client = runtime.session.getClient();
+        const logger = runtime.logger.getLogger('devices');
         let registry: DeviceRegistry | null = null;
         let shared = this.settings.remoteFolderSharedBy !== null;
         if (!shared) {
@@ -784,11 +812,11 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 registry = null;
             }
         }
-        this.devices.open(registry);
-        this.engine.watchDevices(registry);
+        runtime.devices.open(registry);
+        runtime.engine.watchDevices(registry);
         this.devicesOffForSharing = shared;
 
-        const request = await this.devices.pendingRequest();
+        const request = await runtime.devices.pendingRequest();
         if (!request) {
             return true;
         }
@@ -817,14 +845,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     private closeDeviceList(): void {
-        this.devices.open(null);
-        this.engine.watchDevices(null);
+        runtime.devices.open(null);
+        runtime.engine.watchDevices(null);
         this.devicesOffForSharing = false;
     }
 
     /** The device list changed on Drive while syncing: act on a new request for this device, if there is one. */
     private async checkDeviceRequests(): Promise<void> {
-        const request = await this.devices.pendingRequest();
+        const request = await runtime.devices.pendingRequest();
         if (!request) {
             return;
         }
@@ -841,21 +869,21 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * the request stays handled, so it is not acted on a second time.
      */
     private async removedByAnotherDevice(request: DeviceRequest): Promise<void> {
-        this.logger.warn(`Removed from the device list by "${request.byName || request.by}"; signing out`);
-        await this.devices.recordRemoved();
+        runtime.logger.warn(`Removed from the device list by "${request.byName || request.by}"; signing out`);
+        await runtime.devices.recordRemoved();
         await this.endSession();
-        this.showStatus({ ...this.engine.getSummary(), status: 'signed-out' });
+        this.showStatus({ ...runtime.engine.getSummary(), status: 'signed-out' });
         new DeviceRemovedModal(this.app, request, () => this.openSetup()).open();
     }
 
     /** Whether the vault's device list can be shown: synced with an own folder that is not shared, and connected. */
     devicesAvailable(): boolean {
-        return this.devices.current !== null && this.engine.isConnected() && !this.locked;
+        return runtime.devices.current !== null && runtime.engine.isConnected() && !this.locked;
     }
 
     /** Every device syncing the vault, with ways to pause, resume or remove the others. */
     showDevices(): void {
-        const registry = this.devices.current;
+        const registry = runtime.devices.current;
         if (!registry || !this.devicesAvailable()) {
             this.notify(
                 this.devicesOffForSharing
@@ -865,7 +893,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             return;
         }
         new DevicesModal(this.app, {
-            selfId: this.clientUid,
+            selfId: runtime.clientUid,
             list: () => registry.list(),
             ask: async (entry, state) => {
                 // Read again, in case another device asked something since
@@ -874,7 +902,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 await registry.ask(entry.id, {
                     state,
                     at: nextRequestAt({ record, request }),
-                    by: this.clientUid,
+                    by: runtime.clientUid,
                     byName: this.settings.deviceName,
                 });
             },
@@ -884,10 +912,10 @@ export default class ProtonDriveSyncPlugin extends Plugin {
 
     async saveSettings(): Promise<void> {
         await this.saveData(this.settings);
-        this.logger.setLevel(this.settings.logLevel);
-        this.engine.updateSettings(this.settings);
+        runtime.logger.setLevel(this.settings.logLevel);
+        runtime.engine.updateSettings(this.settings);
         // The device name may have changed, which the device list shows.
-        this.devices.noteChange();
+        runtime.devices.noteChange();
     }
 
     private async loadSettings(): Promise<void> {
@@ -1046,9 +1074,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     /** The note's public link on Drive, with Copy and Stop sharing, or a form to make one. */
     shareNote(path: string): void {
         new ShareModal(this.app, path, {
-            load: () => this.engine.noteShareLink(path),
-            create: (options) => this.engine.createNoteShareLink(path, options),
-            remove: () => this.engine.removeNoteShareLink(path),
+            load: () => runtime.engine.noteShareLink(path),
+            create: (options) => runtime.engine.createNoteShareLink(path, options),
+            remove: () => runtime.engine.removeNoteShareLink(path),
         }).open();
     }
 
@@ -1060,7 +1088,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.registerEvent(
             vault.on('delete', (file) => {
                 if (file instanceof TFolder) {
-                    this.engine.onVaultFolderDelete(file.path);
+                    runtime.engine.onVaultFolderDelete(file.path);
                 } else {
                     this.onFileChanged(file);
                 }
@@ -1068,7 +1096,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         );
         this.registerEvent(
             vault.on('rename', (file, oldPath) => {
-                this.engine.onVaultRename(oldPath, file.path, file instanceof TFolder);
+                runtime.engine.onVaultRename(oldPath, file.path, file instanceof TFolder);
             }),
         );
     }
@@ -1077,7 +1105,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         // Folder creation arrives here too; it is handled by the full sync,
         // since an empty folder has no content to upload.
         if (file instanceof TFile) {
-            this.engine.onVaultChange(file.path);
+            runtime.engine.onVaultChange(file.path);
         }
     }
 
@@ -1089,7 +1117,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             );
         }
         this.showStatus(summary);
-        this.devices.noteStatus(summary);
+        runtime.devices.noteStatus(summary);
     }
 
     /** Show a summary everywhere the sync's state appears. */
@@ -1126,8 +1154,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             return;
         }
         const key = JSON.stringify([
-            this.session.isSignedIn(),
-            this.session.accountEmail,
+            runtime.session.isSignedIn(),
+            runtime.session.accountEmail,
             this.locked,
             this.pinEnabled,
             this.settings.remoteFolderUid,
@@ -1256,14 +1284,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     hasUnsyncedChanges(path: string): boolean {
         const file = this.app.vault.getFileByPath(path);
         const stat = file ? { size: file.stat.size, mtime: file.stat.mtime } : null;
-        return this.engine.noteSyncState(path, stat) === 'pending';
+        return runtime.engine.noteSyncState(path, stat) === 'pending';
     }
 
     private indicatorFor(file: TFile): NoteIndicator {
-        const state = this.engine.noteSyncState(file.path, { size: file.stat.size, mtime: file.stat.mtime });
+        const state = runtime.engine.noteSyncState(file.path, { size: file.stat.size, mtime: file.stat.mtime });
         return noteIndicator(
             state,
-            this.engine.pendingChanges().find((change) => change.path === file.path),
+            runtime.engine.pendingChanges().find((change) => change.path === file.path),
         );
     }
 
@@ -1287,14 +1315,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * twenty of them shows one notice, not twenty.
      */
     private onConflict(event: ConflictEvent): void {
-        void this.conflictHistory.add(event);
-        this.pendingConflicts.push(event);
+        void runtime.conflictHistory.add(event);
+        runtime.pendingConflicts.push(event);
         if (this.conflictNoticeTimer !== null) {
             return;
         }
         this.conflictNoticeTimer = window.setTimeout(() => {
             this.conflictNoticeTimer = null;
-            showConflictNotice(this.app, this.pendingConflicts.splice(0), {
+            showConflictNotice(this.app, runtime.pendingConflicts.splice(0), {
                 reviewConflicts: () => new ConflictsModal(this.app, this).open(),
                 compare: (path, copyPath) => compareWithConflictCopy(this.app, path, copyPath),
             });
@@ -1319,7 +1347,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
 
         this.registerDomEvent(document, 'visibilitychange', () => {
             if (document.visibilityState === 'hidden') {
-                this.engine.flushPendingEdits();
+                runtime.engine.flushPendingEdits();
                 // The OS may close the app from the background; save the
                 // expiry as it stands.
                 void this.rememberUnlock();
@@ -1332,7 +1360,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 return;
             }
             this.markActive();
-            this.engine.pollNow();
+            runtime.engine.pollNow();
         });
 
         // Using Obsidian restarts the PIN's clock.
@@ -1345,12 +1373,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 }
             }, LOCK_CHECK_MS),
         );
-        this.registerDomEvent(window, 'online', () => this.engine.pollNow());
+        this.registerDomEvent(window, 'online', () => runtime.engine.pollNow());
 
         // Moving between Wi-Fi and mobile data, for the "Wi-Fi only" setting.
         const connection = networkConnection();
         if (connection) {
-            const onChange = () => this.engine.pollNow();
+            const onChange = () => runtime.engine.pollNow();
             connection.addEventListener('change', onChange);
             this.register(() => connection.removeEventListener('change', onChange));
         }

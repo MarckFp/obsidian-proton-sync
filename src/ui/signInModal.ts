@@ -1,6 +1,7 @@
 import { App, Modal, Notice, Setting, setIcon } from 'obsidian';
 
 import type ProtonDriveSyncPlugin from '../main';
+import { getRuntime } from '../runtime';
 
 /**
  * Walks the user through Proton's browser sign-in.
@@ -46,7 +47,7 @@ export class SignInModal extends Modal {
     private async begin(contentEl: HTMLElement, status: HTMLElement, spinner: HTMLElement): Promise<void> {
         let handle;
         try {
-            handle = await this.plugin.session.beginWebSignIn(this.abortController.signal, () =>
+            handle = await getRuntime().session.beginWebSignIn(this.abortController.signal, () =>
                 status.setText('Approved. Finishing sign-in…'),
             );
         } catch (error) {

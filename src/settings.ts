@@ -62,6 +62,8 @@ export type PluginSettings = {
     /** Names the device in conflict copies and in the sync log. */
     deviceName: string;
     logLevel: LogLevel;
+    /** Put real note names in the log; off by default, since logs leave the device in bug reports. */
+    logShowsNames: boolean;
 
     /** Set once the first-run setup has been shown, so it never reappears. */
     onboardingComplete: boolean;
@@ -161,6 +163,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 
     deviceName: '',
     logLevel: 'info',
+    logShowsNames: false,
 
     onboardingComplete: false,
 

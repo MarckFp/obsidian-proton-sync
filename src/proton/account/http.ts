@@ -1,3 +1,4 @@
+import { assertProtonUrl } from '../endpoints';
 /**
  * A minimal HTTP client for the account module, in place of `ky`.
  *
@@ -88,6 +89,8 @@ const MAX_RETRY_AFTER_MS = 60_000;
 
 export function createHttpClient(config: ClientConfig): HttpClient {
     const call = <T>(url: string, options: RequestOptions = {}): ResponsePromise<T> => {
+        // One choke point for every request the plugin makes, signed in or not.
+        assertProtonUrl(url);
         let acceptJson = false;
         // Sent on the next microtask, so a `.json()` chained straight onto the
         // call can still ask for JSON first. ky does the same.
