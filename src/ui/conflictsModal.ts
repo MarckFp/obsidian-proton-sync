@@ -13,6 +13,7 @@ const PENDING_REASON_TEXT: Record<ConflictReason, string> = {
     'deleted-remotely-modified-locally': 'Deleted on another device, but edited here.',
     'deleted-locally-modified-remotely': 'Deleted here, but edited on another device.',
     'case-collision': 'Has the same name as another file apart from letter case.',
+    'windows-name': 'Has a name Windows cannot store.',
 };
 
 /**

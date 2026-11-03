@@ -15,7 +15,36 @@ import {
     replacePrefix,
     splitExtension,
     staysInVault,
+    needsWindowsName,
+    windowsName,
 } from '../src/sync/paths';
+
+describe('windowsName', () => {
+    it('leaves names Windows can store alone', () => {
+        for (const name of ['Note.md', 'auxiliary.md', 'console.log', 'COM10.md', '.obsidian', 'a.b.c']) {
+            assert.equal(windowsName(name), null, name);
+        }
+    });
+
+    it('renames reserved device names, with or without an extension', () => {
+        assert.equal(windowsName('aux.md'), 'aux (renamed for Windows).md');
+        assert.equal(windowsName('CON'), 'CON (renamed for Windows)');
+        assert.equal(windowsName('com1.tar.gz'), 'com1.tar (renamed for Windows).gz');
+        assert.equal(windowsName('LPT9 .txt'), 'LPT9  (renamed for Windows).txt');
+    });
+
+    it('replaces characters Windows refuses, and drops trailing dots and spaces', () => {
+        assert.equal(windowsName('Meeting 10:30.md'), 'Meeting 10-30 (renamed for Windows).md');
+        assert.equal(windowsName('note.'), 'note (renamed for Windows)');
+        assert.equal(windowsName('Notes. '), 'Notes (renamed for Windows)');
+        assert.equal(windowsName('a?b*.md', 2), 'a-b- (renamed for Windows 2).md');
+    });
+
+    it('finds such a name anywhere in a path', () => {
+        assert.equal(needsWindowsName('Projects/aux/plan.md'), true);
+        assert.equal(needsWindowsName('Projects/plan.md'), false);
+    });
+});
 
 describe('names and paths that could lead out of the vault', () => {
     it('takes ordinary names, and refuses ones that would leave the vault or split into several', () => {

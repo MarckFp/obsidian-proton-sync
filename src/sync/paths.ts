@@ -95,6 +95,47 @@ export function replacePrefix(path: string, fromFolder: string, toFolder: string
     return path === fromFolder ? toFolder : `${toFolder}${path.slice(fromFolder.length)}`;
 }
 
+/** Device names Windows reserves, with or without an extension: `aux.md` is not a file it can create. */
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+/**
+ * Whether Windows refuses a character in a name: control characters and
+ * `< > : " | ? *`. `:` would write to a hidden stream of another file instead.
+ */
+function windowsForbids(char: string): boolean {
+    return char.charCodeAt(0) < 32 || '<>:"|?*'.includes(char);
+}
+
+/**
+ * A name Windows can store in place of `name`, or null when `name` is fine
+ * there as it is.
+ *
+ * Drive, Linux, Android and macOS take names Windows cannot: `aux.md`, which
+ * it reserves for a device; `Meeting 10:30.md`, where `:` would write to a
+ * hidden stream of a file called `Meeting 10`; and `note.`, whose trailing dot
+ * it drops, so the file would land on `note` and overwrite it. A Windows
+ * device renames such a file on Drive to the name returned here, numbered by
+ * `n` when that is taken, so every device then syncs it under a name all of
+ * them can store. Forbidden characters become `-`, trailing dots and spaces
+ * go, and the suffix says why the name changed.
+ */
+export function windowsName(name: string, n = 1): string | null {
+    const reserved = WINDOWS_RESERVED.test(name.split('.')[0].trimEnd());
+    if (!reserved && ![...name].some(windowsForbids) && !/[. ]$/.test(name)) {
+        return null;
+    }
+    const cleaned = [...name]
+        .map((char) => (windowsForbids(char) ? '-' : char))
+        .join('')
+        .replace(/[. ]+$/, '');
+    const { stem, extension } = splitExtension(cleaned);
+    return `${stem || 'unnamed'} (renamed for Windows${n === 1 ? '' : ` ${n}`})${extension}`;
+}
+
+/** Whether Windows cannot store a vault path as it is: some name in it would need {@link windowsName}. */
+export function needsWindowsName(path: string): boolean {
+    return path.split('/').some((segment) => windowsName(segment) !== null);
+}
+
 export function splitExtension(path: string): { stem: string; extension: string } {
     const name = basename(path);
     const dot = name.lastIndexOf('.');

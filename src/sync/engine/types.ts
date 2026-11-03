@@ -58,6 +58,8 @@ export type PendingReason =
     | 'retrying'
     | 'too-large'
     | 'name-clash'
+    /** Its name cannot be stored on Windows, and it could not be renamed on Drive. */
+    | 'windows-name'
     | 'conflict';
 
 /**
@@ -149,6 +151,11 @@ export type EngineEnvironment = {
      * when not given.
      */
     caseInsensitive?: boolean;
+    /**
+     * Whether the vault is on Windows, which cannot store some names Drive and
+     * the other systems can; such files are renamed on Drive. See `windowsName`.
+     */
+    windows?: boolean;
     /** Whether the connection is known to be cellular. */
     isMetered: () => boolean;
     /** Whether Obsidian's window is hidden, minimised or in the background; Drive is then checked less often. */

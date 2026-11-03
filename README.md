@@ -426,6 +426,14 @@ devices never need to be online together. What to expect when they are:
   same goes for folders, such as `Notes` and `notes`. Each rename shows up in the
   conflict notice and history. A pair that cannot be renamed is left unsynced,
   and you are told.
+- **Names Windows cannot store**, such as `aux.md` (a reserved device name),
+  `Meeting 10:30.md`, or `note.` (Windows drops the trailing dot, so it would
+  land on `note`), are fine on macOS, Linux and Android. When a Windows device
+  meets one, it renames it on Drive, for example to
+  `Meeting 10-30 (renamed for Windows).md`, so every device syncs it under a
+  name all of them can store. A vault no Windows device syncs keeps its names.
+  If the rename fails, the file is not synced on that Windows device, and
+  **Not synced yet** says why.
 - **On Windows, a file open in another program** (a video in a player, say) may
   be locked, and an update to it waits until the next sync after it is closed.
 

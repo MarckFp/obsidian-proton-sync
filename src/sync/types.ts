@@ -57,7 +57,12 @@ export type ConflictReason =
      * cannot keep apart. Not produced by `reconcile`; reported by the engine
      * when it settles or finds such a pair.
      */
-    | 'case-collision';
+    | 'case-collision'
+    /**
+     * A name Windows cannot store, such as `aux.md` or `note.`. Reported by
+     * the engine on Windows when it renames such a file on Drive.
+     */
+    | 'windows-name';
 
 /** Local view of a path at reconcile time; `undefined` means it does not exist. */
 export type LocalState = ContentStamp;

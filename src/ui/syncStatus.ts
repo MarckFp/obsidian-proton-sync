@@ -61,6 +61,7 @@ const PENDING_TEXT: Record<PendingReason, string> = {
     retrying: 'Failed to sync; will try again',
     'too-large': 'Over this device’s size limit, so not synced here',
     'name-clash': 'Its name clashes with another apart from letter case',
+    'windows-name': 'Its name cannot be used on Windows, and it could not be renamed on Drive',
     conflict: 'Changed in two places; waiting for your decision',
 };
 
