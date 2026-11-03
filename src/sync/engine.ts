@@ -26,6 +26,7 @@ import {
     parentPath,
     replacePrefix,
     splitExtension,
+    vaultSpelling,
 } from './paths';
 import { reconcile } from './reconcile';
 import type { SyncState } from './state';
@@ -858,9 +859,7 @@ export class SyncEngine {
             return;
         }
 
-        if (await this.cases.isCaseInsensitive()) {
-            paths = await this.cases.settleIn(paths);
-        }
+        paths = await this.cases.settleIn(paths);
 
         this.setStatus('syncing');
         try {
@@ -2513,11 +2512,14 @@ export class SyncEngine {
             return null;
         }
         if (location.node.type === NodeType.Folder) {
-            // A new folder spelled like an existing one but for letter case
-            // would land inside it here; give it a name of its own first.
-            const path = (await this.cases.isCaseInsensitive())
-                ? await this.cases.resolve(location.path, this.cases.claimants([]))
-                : location.path;
+            // A new folder spelled like an existing one but for letter case,
+            // or in other Unicode characters, would land inside it here; give
+            // it a name of its own first.
+            const path = await this.cases.resolve(location.path, this.cases.claimants([]));
+            if (vaultSpelling(path) !== path) {
+                // Could not be renamed; made here, it would be another folder's twin.
+                return null;
+            }
             if (!this.filter.isExcludedWithAncestors(path)) {
                 await this.vault.ensureFolder(path);
                 this.folderUids.set(path, location.node.uid);

@@ -12,6 +12,8 @@ import { DriveEventType, NodeWithSameNameExistsValidationError } from '@protonte
 
 import { TFile, TFolder, type App, type DataAdapter, type TAbstractFile } from 'obsidian';
 
+import { vaultSpelling } from '../../src/sync/paths';
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -26,6 +28,7 @@ function parentOf(path: string): string {
 
 // -- vault -------------------------------------------------------------------
 
+/** Spells every path it is given as Obsidian does, in Unicode NFC with plain spaces. */
 export class MemoryVault {
     readonly files = new Map<string, { data: Uint8Array; mtime: number }>();
     readonly folders = new Set<string>();
@@ -34,21 +37,23 @@ export class MemoryVault {
     private clock = 1_000_000;
 
     write(path: string, text: string): void {
+        path = vaultSpelling(path);
         this.ensureParents(path);
         this.files.set(path, { data: encoder.encode(text), mtime: this.tick() });
     }
 
     read(path: string): string | undefined {
-        const file = this.files.get(path);
+        const file = this.files.get(vaultSpelling(path));
         return file ? decoder.decode(file.data) : undefined;
     }
 
     mkdir(path: string): void {
-        this.ensureParents(`${path}/x`);
+        this.ensureParents(`${vaultSpelling(path)}/x`);
     }
 
     /** Rename a file or a folder, as Obsidian would. */
     rename(from: string, to: string): void {
+        [from, to] = [vaultSpelling(from), vaultSpelling(to)];
         this.ensureParents(to);
         if (this.files.has(from)) {
             this.files.set(to, this.files.get(from)!);
@@ -115,7 +120,7 @@ export class MemoryVault {
                     await adapter.writeBinary(file.path, data, options);
                 },
                 async createBinary(path: string, data: ArrayBuffer, options?: { mtime?: number }) {
-                    if (vault.files.has(path)) {
+                    if (vault.files.has(vaultSpelling(path))) {
                         throw new Error('File already exists.');
                     }
                     vault.viaVaultApi.push(['create', path]);
@@ -152,6 +157,7 @@ export class MemoryVault {
                 };
             },
             async stat(path: string) {
+                path = vaultSpelling(path);
                 const file = vault.files.get(path);
                 if (file) {
                     return { type: 'file', size: file.data.byteLength, mtime: file.mtime, ctime: file.mtime };
@@ -159,7 +165,7 @@ export class MemoryVault {
                 return vault.folders.has(path) ? { type: 'folder', size: 0, mtime: 0, ctime: 0 } : null;
             },
             async exists(path: string) {
-                return path === '' || vault.files.has(path) || vault.folders.has(path);
+                return path === '' || vault.files.has(vaultSpelling(path)) || vault.folders.has(vaultSpelling(path));
             },
             async read(path: string) {
                 return decoder.decode(vault.mustRead(path));
@@ -171,6 +177,7 @@ export class MemoryVault {
                 vault.write(path, text);
             },
             async writeBinary(path: string, data: ArrayBuffer, options?: { mtime?: number }) {
+                path = vaultSpelling(path);
                 vault.ensureParents(path);
                 vault.files.set(path, { data: new Uint8Array(data.slice(0)), mtime: options?.mtime ?? vault.tick() });
             },
@@ -181,6 +188,7 @@ export class MemoryVault {
                 vault.rename(from, to);
             },
             async copy(from: string, to: string) {
+                to = vaultSpelling(to);
                 vault.ensureParents(to);
                 vault.files.set(to, { data: vault.mustRead(from).slice(), mtime: vault.tick() });
             },
@@ -199,7 +207,7 @@ export class MemoryVault {
     }
 
     private mustRead(path: string): Uint8Array {
-        const file = this.files.get(path);
+        const file = this.files.get(vaultSpelling(path));
         if (!file) {
             throw new Error(`ENOENT: ${path}`);
         }

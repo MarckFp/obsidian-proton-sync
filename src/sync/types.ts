@@ -62,7 +62,12 @@ export type ConflictReason =
      * A name Windows cannot store, such as `aux.md` or `note.`. Reported by
      * the engine on Windows when it renames such a file on Drive.
      */
-    | 'windows-name';
+    | 'windows-name'
+    /**
+     * The same name as another file once spelled as the vault spells names
+     * (see `vaultSpelling`), such as the same title in NFD and NFC.
+     */
+    | 'name-spelling';
 
 /** Local view of a path at reconcile time; `undefined` means it does not exist. */
 export type LocalState = ContentStamp;
