@@ -5,7 +5,10 @@ import './polyfills';
 
 import { getRuntime } from './runtime';
 import { watchPlugins } from './security/pluginWatch';
-import { installTripwires } from './security/tripwire';
+import { installTripwires, type TripwireHit } from './security/tripwire';
+import { requireUi, uiProof } from './security/capability';
+import { checkPermissions } from './security/permissions';
+import { checkSelf } from './security/selfIntegrity';
 import {
     apiVersion,
     type App,
@@ -169,6 +172,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 }
                 announced.add(key);
                 runtime.logger.warn(`Tripwire: ${hit.by ?? 'something'} reached ${hit.wire}`);
+                void this.rememberTripwireHit(hit);
                 new Notice(
                     `Proton Drive Sync: ${hit.by ?? 'something'} reached for the Proton sign-in (${hit.wire}). ` +
                         'Settings → Proton Drive Sync → Security lists it.',
@@ -194,7 +198,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                     versionsKey: (path) => runtime.engine.versionsKey(path),
                     noteVersions: (path) => runtime.engine.noteVersions(path),
                     compareVersion: (path, version) => versionComparison(this, path, version),
-                    shareNote: (path) => this.shareNote(path),
+                    shareNote: (path) => this.shareNote(path, uiProof()),
                     recentlyDeleted: () => runtime.engine.recentlyDeleted(),
                     restoreDeleted: async (item) => {
                         await runtime.engine.restoreDeleted(item);
@@ -316,6 +320,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.settingsTab = new ProtonDriveSyncSettingsTab(this.app, this);
         this.addSettingTab(this.settingsTab);
         window.setTimeout(() => void this.scanOtherPlugins(), 4000);
+        window.setTimeout(() => void this.checkOwnSecurity(), 5000);
         this.registerCommands();
         this.registerVaultEvents();
         this.registerLifecycleEvents();
@@ -575,7 +580,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     /** Sign out, with the PIN first when there is one; see {@link endSession}. */
-    async signOut(): Promise<void> {
+    async signOut(proof?: string): Promise<void> {
+        requireUi(proof, 'signing out');
         if (!(await this.confirmPin('sign out'))) {
             return;
         }
@@ -624,6 +630,105 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * new or updated one is a security event. This cannot stop the code — it is
      * the same process — but it makes the change visible instead of silent.
      */
+
+
+    /** Where the tripwire record lives: beside the state, never synced. */
+    private tripwireLogPath(): string {
+        return this.pluginFile('tripwire-log.json');
+    }
+
+    /**
+     * Keep hits on disk as well as in memory.
+     *
+     * A plugin that reads the sign-in during startup does it before anyone is
+     * looking at a notice, and Obsidian is often closed again straight after.
+     * The file is what makes "it happened while I was not watching" visible on
+     * the next start; it holds plugin ids and wire names, no note names.
+     */
+    private async rememberTripwireHit(hit: TripwireHit): Promise<void> {
+        try {
+            const path = this.tripwireLogPath();
+            let log: { seenAt: number; hits: TripwireHit[] } = { seenAt: 0, hits: [] };
+            if (await this.app.vault.adapter.exists(path)) {
+                log = JSON.parse(await this.app.vault.adapter.read(path)) as typeof log;
+            }
+            log.hits = [...(log.hits ?? []), hit].slice(-200);
+            await this.app.vault.adapter.write(path, JSON.stringify(log, null, 1));
+        } catch (error) {
+            runtime.logger.warn('Could not write the tripwire record', error);
+        }
+    }
+
+    /** On start: say whether anything reached for the sign-in since the last one. */
+    async reportEarlierTripwireHits(): Promise<void> {
+        try {
+            const path = this.tripwireLogPath();
+            if (!(await this.app.vault.adapter.exists(path))) {
+                return;
+            }
+            const log = JSON.parse(await this.app.vault.adapter.read(path)) as { seenAt: number; hits: TripwireHit[] };
+            const fresh = (log.hits ?? []).filter((hit) => hit.at > (log.seenAt ?? 0));
+            log.seenAt = Date.now();
+            await this.app.vault.adapter.write(path, JSON.stringify(log, null, 1));
+            if (fresh.length === 0) {
+                return;
+            }
+            const who = [...new Set(fresh.map((hit) => hit.by ?? 'something'))].slice(0, 3).join(', ');
+            new Notice(
+                `Proton Drive Sync: ${fresh.length} attempt(s) to reach the Proton sign-in since the last start ` +
+                    `(${who}). Settings → Proton Drive Sync → Security lists them.`,
+                20000,
+            );
+        } catch (error) {
+            runtime.logger.warn('Could not read the tripwire record', error);
+        }
+    }
+
+    /**
+     * Three things that decide whether the hardening holds at all: who else can
+     * write to this plugin's code and to the stored sign-in, whether that code
+     * is still what was installed, and whether anything has already reached for
+     * the sign-in since the last start.
+     */
+    async checkOwnSecurity(): Promise<void> {
+        if (this.settings.warnOnInsecurePermissions) {
+            try {
+                const findings = checkPermissions(this.app, this.pluginDir());
+                runtime.securityFindings = findings;
+                if (findings.length > 0) {
+                    const first = findings[0].problem;
+                    const more = findings.length > 1 ? ` (+${findings.length - 1} more)` : '';
+                    new Notice(
+                        `Proton Drive Sync: ${first}${more}. Anyone who can write this plugin's code runs it ` +
+                            'with your keyring; see Settings → Proton Drive Sync → Security.',
+                        15000,
+                    );
+                    if (this.settings.refuseOnInsecurePermissions) {
+                        await this.setPaused(true);
+                        runtime.logger.warn('Syncing paused: the vault is writable by other users');
+                    }
+                }
+            } catch (error) {
+                runtime.logger.warn('Could not check the permissions of this vault', error);
+            }
+        }
+
+        try {
+            runtime.selfIntegrity = await checkSelf(this.app, this.pluginDir(), this.manifest.version, runtime.logger);
+            if (runtime.selfIntegrity === 'changed-without-update') {
+                new Notice(
+                    'Proton Drive Sync: this plugin\'s own code changed without a new version. If you did not ' +
+                        'replace it, sign out of Proton and reinstall.',
+                    20000,
+                );
+            }
+        } catch (error) {
+            runtime.logger.warn('Could not check this plugin\'s own code', error);
+        }
+
+        await this.reportEarlierTripwireHits();
+    }
+
     async scanOtherPlugins(): Promise<void> {
         if (!this.settings.watchOtherPlugins) {
             return;
@@ -1098,7 +1203,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                     return false;
                 }
                 if (!checking) {
-                    this.shareNote(file.path);
+                    this.shareNote(file.path, uiProof());
                 }
                 return true;
             },
@@ -1135,7 +1240,10 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     /** The note's public link on Drive, with Copy and Stop sharing, or a form to make one. */
-    shareNote(path: string): void {
+    shareNote(path: string, proof?: string): void {
+        // A public link is exfiltration with the user's own keys: only this
+        // plugin's UI may ask for one. See security/capability.ts.
+        requireUi(proof, 'a share link');
         new ShareModal(this.app, path, {
             load: () => runtime.engine.noteShareLink(path),
             create: (options) => runtime.engine.createNoteShareLink(path, options),
@@ -1330,7 +1438,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * applies. Through the editor when the note is open, so the cursor stays
      * and nothing typed meanwhile is written over; else through the vault.
      */
-    async restoreVersion(path: string, data: ArrayBuffer): Promise<void> {
+    async restoreVersion(path: string, data: ArrayBuffer, proof?: string): Promise<void> {
+        requireUi(proof, 'restoring an old version');
         const file = this.app.vault.getFileByPath(path);
         if (!file) {
             throw new Error('the note no longer exists');

@@ -93,7 +93,50 @@ Measured: appending a line to another plugin's `main.js` and restarting produced
 read this vault and the Proton sign-in — check Settings → Community plugins.`,
 and the settings section listed the change with the new fingerprint.
 
+
+## Capability, not only credentials
+
+Removing the tokens from reach is not enough: the plugin's own methods stay
+callable from every other plugin, and some of them act on the user's data.
+`shareNote()` created a public read-only link to any note — exfiltration with the
+user's own keys, no token needed. `signOut()` and `restoreVersion()` were the
+same kind of lever.
+
+`security/capability.ts` generates a token in module scope and hands it to this
+plugin's UI only. Those three methods now refuse to run without it:
+
+```
+shareNote("README.md")          -> Refusing a share link: it was not asked for from this plugin's own interface
+signOut()                       -> Refusing signing out: …
+restoreVersion("README.md", …)  -> Refusing restoring an old version: …
+```
+
+Measured with a probe plugin that made exactly those three calls.
+
+## Who can write the code, and is it still the code
+
+- `security/permissions.ts` reports a plugin folder, `main.js`, `session.bin` or
+  `.obsidian` that other users can write (mode bits, desktop only). Whoever can
+  replace `main.js` runs code with the user's keyring, which defeats the
+  encrypted session entirely. It warns by default; `refuseOnInsecurePermissions`
+  pauses syncing instead.
+- `security/selfIntegrity.ts` records the digest of `main.js` with its version at
+  install. Same version and different code is not an update, and is reported as
+  `changed-without-update` with a notice that says to treat the sign-in as
+  exposed.
+
+Measured: with the folder at `0777` the settings section listed
+`the plugin folder is writable by anyone on this machine (0777)` and
+`this plugin's own code is writable by anyone on this machine`; replacing
+`main.js` without bumping the version produced `Changed without a new version —
+treat the sign-in as exposed`.
+
+Caveat from that test: the check sees the permissions the app sees. In a
+container or on a share the mount can present `0700` while the host has `0777`,
+and this cannot tell.
+
 ## Not done yet
+
 
 - The desktop keystore path cannot be exercised in the headless test container
   (no Secret Service), so it is covered by unit tests rather than end-to-end.

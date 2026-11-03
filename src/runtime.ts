@@ -13,6 +13,8 @@
 import type { ConflictEvent } from './sync/engine/types';
 import type { PluginWatchReport } from './security/pluginWatch';
 import type { TripwireReport } from './security/tripwire';
+import type { PermissionFinding } from './security/permissions';
+import type { IntegrityResult } from './security/selfIntegrity';
 import type { ConflictHistory } from './sync/conflictHistory';
 import type { DeviceList } from './sync/devices';
 import type { SyncEngine } from './sync/engine';
@@ -33,6 +35,10 @@ const runtime = {
     pendingConflicts: [] as ConflictEvent[],
     /** The last scan of the plugins installed alongside this one; see security/pluginWatch.ts. */
     pluginWatch: null as PluginWatchReport | null,
+    /** Permission problems found at this start; see security/permissions.ts. */
+    securityFindings: [] as PermissionFinding[],
+    /** Whether this plugin's own code changed without a version change; see security/selfIntegrity.ts. */
+    selfIntegrity: null as IntegrityResult | null,
     /** Everything that has reached for the sign-in since this start; see security/tripwire.ts. */
     tripwire: null as TripwireReport | null,
 };

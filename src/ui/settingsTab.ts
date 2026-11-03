@@ -9,6 +9,7 @@ import { ConflictsModal } from './conflictsModal';
 import { FolderPickerModal } from './folderPickerModal';
 import { SignInModal } from './signInModal';
 import { getRuntime } from '../runtime';
+import { uiProof } from '../security/capability';
 
 export const CONFLICT_POLICIES: Record<ConflictPolicy, string> = {
     'keep-both': 'Keep both versions (recommended)',
@@ -172,7 +173,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                             }
                             if (signedIn) {
                                 button.setButtonText('Sign out').onClick(async () => {
-                                    await this.plugin.signOut();
+                                    await this.plugin.signOut(uiProof());
                                     this.update();
                                 });
                                 return;
@@ -577,6 +578,39 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                                 this.update();
                             }),
                         ),
+                },
+                {
+                    name: 'This plugin’s own code, and who can write it',
+                    desc:
+                        'Whoever can replace main.js runs code with your keyring, so the code is checked against what ' +
+                        'was installed, and the vault permissions are reported.',
+                    render: (setting) => {
+                        const box = setting.settingEl.createDiv({ cls: 'proton-drive-sync-integrity' });
+                        const integrity = getRuntime().selfIntegrity;
+                        const words: Record<string, string> = {
+                            'first-run': 'Recorded on this start.',
+                            unchanged: 'Unchanged since it was installed.',
+                            updated: 'Updated with a new version.',
+                            'changed-without-update': 'Changed without a new version — treat the sign-in as exposed.',
+                        };
+                        box.createEl('p', { text: `${integrity ? words[integrity] : 'Not checked yet.'}` });
+                        const findings = getRuntime().securityFindings;
+                        if (findings.length === 0) {
+                            box.createEl('p', { text: 'No permission problems found.' });
+                        }
+                        for (const finding of findings) {
+                            box.createEl('p', { text: `• ${finding.problem}` });
+                        }
+                        setting.addToggle((toggle) =>
+                            toggle
+                                .setTooltip('Pause syncing while the vault is writable by other users')
+                                .setValue(this.plugin.settings.refuseOnInsecurePermissions)
+                                .onChange(async (value) => {
+                                    this.plugin.settings.refuseOnInsecurePermissions = value;
+                                    await this.plugin.saveSettings();
+                                }),
+                        );
+                    },
                 },
                 {
                     name: 'Attempts to reach the sign-in',

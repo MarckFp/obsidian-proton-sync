@@ -66,6 +66,10 @@ export type PluginSettings = {
     logShowsNames: boolean;
     /** Scan the other plugins in this vault at start and say when one is added, updated or removed. */
     watchOtherPlugins: boolean;
+    /** Say when the vault, the config folder or this plugin's code can be written by other users. */
+    warnOnInsecurePermissions: boolean;
+    /** Refuse to sync at all in that state. Off by default: a vault on a share is a legitimate setup. */
+    refuseOnInsecurePermissions: boolean;
 
     /** Set once the first-run setup has been shown, so it never reappears. */
     onboardingComplete: boolean;
@@ -167,6 +171,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
     logLevel: 'info',
     logShowsNames: false,
     watchOtherPlugins: true,
+    warnOnInsecurePermissions: true,
+    refuseOnInsecurePermissions: false,
 
     onboardingComplete: false,
 

@@ -7,6 +7,7 @@ import { isTextPath } from '../sync/media';
 import { basename, conflictCopyOriginal, isConflictCopyOf, parentPath } from '../sync/paths';
 import { DiffModal, type DiffOptions } from './diffModal';
 import { getRuntime } from '../runtime';
+import { uiProof } from '../security/capability';
 
 /**
  * Show a conflict waiting on a decision as a diff of this device's version
@@ -168,7 +169,7 @@ export function versionComparison(plugin: ProtonDriveSyncPlugin, path: string, v
     const name = basename(path);
     const when = new Date(version.created).toLocaleString();
     const restore = async (data: ArrayBuffer) => {
-        await plugin.restoreVersion(path, data);
+        await plugin.restoreVersion(path, data, uiProof());
         new Notice(`Restored the version of "${name}" from ${when}. It syncs as a new version.`);
     };
     const unsynced = plugin.hasUnsyncedChanges(path)
