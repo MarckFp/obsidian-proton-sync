@@ -135,7 +135,13 @@ export function standingOf(entry: Pick<DeviceEntry, 'record' | 'request'>): Devi
 
 type RegistryDrive = Pick<
     DriveIO,
-    'iterateChildren' | 'createFolder' | 'uploadNewFile' | 'uploadRevision' | 'downloadFile' | 'trashNode'
+    | 'iterateChildren'
+    | 'createFolder'
+    | 'uploadNewFile'
+    | 'uploadRevision'
+    | 'latestRevisionUid'
+    | 'downloadRevision'
+    | 'trashNode'
 >;
 
 /**
@@ -235,7 +241,15 @@ export class DeviceRegistry {
         if (uid === undefined) {
             return null;
         }
-        const data = await this.drive.downloadFile(uid);
+        // The newest revision, as Drive itself lists it. The files here are
+        // updated in place, so the node stays the same; asking the SDK for
+        // the node's current revision can serve the one it cached before,
+        // and a paused device, which reads no events, never sees it change.
+        const revision = await this.drive.latestRevisionUid(uid);
+        if (revision === null) {
+            return null;
+        }
+        const data = await this.drive.downloadRevision(revision);
         let parsed: T | null = null;
         try {
             parsed = parse(JSON.parse(new TextDecoder().decode(data)));
