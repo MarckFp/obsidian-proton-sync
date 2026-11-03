@@ -1848,6 +1848,16 @@ describe('SyncEngine — names Windows cannot store', () => {
         assert.equal(vault.read('Logs/10-30 (renamed for Windows).md'), 'a time');
     });
 
+    it('renames a file inside a folder it renamed, in the same pass', async () => {
+        const drive = new FakeDrive();
+        drive.put('aux/10:30.md', 'a time');
+        const { vault, settled } = await setup({ drive, environment: WINDOWS });
+        await settled();
+
+        assert.deepEqual(drive.notePaths(), ['aux (renamed for Windows)/10-30 (renamed for Windows).md']);
+        assert.equal(vault.read('aux (renamed for Windows)/10-30 (renamed for Windows).md'), 'a time');
+    });
+
     it('renames one that arrives from another device while syncing', async () => {
         const { vault, drive, engine, settled } = await setup({ environment: WINDOWS });
         await settled();

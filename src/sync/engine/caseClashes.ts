@@ -17,7 +17,7 @@ import type { SyncState } from '../state';
 import type { RemoteState } from '../types';
 import type { VaultIO } from '../vault';
 import { NodeWithSameNameExistsValidationError } from '@protontech/drive-sdk';
-import { byDepth, renameInTree } from './helpers';
+import { byDepth, movedPath, renameInTree } from './helpers';
 import type { ConflictEvent, EngineEnvironment } from './types';
 
 /** What the case-clash handling needs from the engine. */
@@ -211,8 +211,7 @@ export class CaseClashes {
         const taken = this.claimants([...local.folders, ...local.files, ...tree.folders.keys(), ...tree.files.keys()]);
         const moved: [from: string, to: string][] = [];
         for (const listed of [...tree.folders.keys(), ...tree.files.keys()].sort(byDepth)) {
-            // Where it is now, if a folder above it was renamed earlier in this loop.
-            const path = moved.reduce((current, [from, to]) => (isWithin(current, from) ? replacePrefix(current, from, to) : current), listed);
+            const path = movedPath(listed, moved);
             const isFolder = tree.folders.has(path);
             const uid = tree.folders.get(path) ?? tree.files.get(path)?.nodeUid;
             const name = basename(path);
@@ -240,15 +239,17 @@ export class CaseClashes {
             return;
         }
         const taken = this.claimants([...local.folders, ...local.files, ...tree.folders.keys(), ...tree.files.keys()]);
-        for (const path of [...tree.folders.keys(), ...tree.files.keys()].sort(byDepth)) {
+        const moved: [from: string, to: string][] = [];
+        for (const listed of [...tree.folders.keys(), ...tree.files.keys()].sort(byDepth)) {
+            const path = movedPath(listed, moved);
             const uid = tree.folders.get(path) ?? tree.files.get(path)?.nodeUid;
             if (uid === undefined || windowsName(basename(path)) === null || this.host.filter().isExcludedWithAncestors(path)) {
-                // Re-keyed under a folder renamed earlier in this loop, fine as it is, or not synced.
                 continue;
             }
             const renamed = await this.renameForWindows(uid, path, taken);
             if (renamed !== null) {
                 renameInTree(tree, path, renamed);
+                moved.push([path, renamed]);
             }
         }
     }

@@ -65,6 +65,11 @@ export function renameInTree(tree: RemoteTree, from: string, to: string): void {
     }
 }
 
+/** Where `path` is now, after the folder renames in `moved`, made in order. */
+export function movedPath(path: string, moved: readonly [from: string, to: string][]): string {
+    return moved.reduce((current, [from, to]) => (isWithin(current, from) ? replacePrefix(current, from, to) : current), path);
+}
+
 export function byDepth(a: string, b: string): number {
     return a.split('/').length - b.split('/').length || a.localeCompare(b);
 }
