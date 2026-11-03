@@ -74,6 +74,25 @@ vault, same machine:
 | Log lines carrying note names | yes | `GET «file 6ffe59» 200 (351ms)` |
 | Sync still works during the change | — | yes: soak test continued, 41 notes, `pending: 0`, `retries: 0` |
 
+## Watching the other plugins
+
+Every plugin in the vault can read the vault and this plugin's sign-in, so the
+set of installed plugins is part of the security model. At each start the plugin
+fingerprints the others — a sha-256 of each `main.js`, not only the version a
+plugin writes about itself — compares it with the previous start, and reports
+what is new, changed or gone, in a notice and in Settings → Proton Drive Sync →
+Security. `watchOtherPlugins` turns it off.
+
+It is **tamper-evident, not tamper-proof**: a hostile plugin shares the process
+and could rewrite the record. It covers the realistic cases — a plugin you
+installed once updates itself, or a new one appears — instead of those happening
+in silence.
+
+Measured: appending a line to another plugin's `main.js` and restarting produced
+`Attacker Probe (code changed) changed since the last start. Any plugin here can
+read this vault and the Proton sign-in — check Settings → Community plugins.`,
+and the settings section listed the change with the new fingerprint.
+
 ## Not done yet
 
 - The desktop keystore path cannot be exercised in the headless test container
