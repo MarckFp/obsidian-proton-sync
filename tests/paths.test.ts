@@ -11,6 +11,7 @@ import {
     conflictCopyPath,
     basename,
     isSafeName,
+    isConflictCopyOf,
     isWithin,
     replacePrefix,
     splitExtension,
@@ -265,10 +266,51 @@ describe('conflictCopyPath', () => {
         assert.ok(bytes(basename(copy)) <= 255);
     });
 
+    it('keeps a long device name whole when the note’s name fits beside it', () => {
+        const device = 'Office ThinkPad X1 Carbon Gen 11 at work';
+        assert.equal(
+            conflictCopyPath('note.md', device, when),
+            `note (conflict 2026-09-18 1431 from ${device}).md`,
+        );
+    });
+
+    it('cuts a long device name before the note’s name', () => {
+        const device = 'Office ThinkPad X1 Carbon Gen 11 at work';
+        const copy = conflictCopyPath(`${'N'.repeat(200)}.md`, device, when);
+        assert.ok(bytes(copy) <= 255, `name is ${bytes(copy)} bytes`);
+        assert.ok(copy.endsWith(` (conflict 2026-09-18 1431 from ${device.slice(0, 32)}).md`));
+    });
+
     it('caps an absurd device name instead of the note', () => {
         const copy = conflictCopyPath('note.md', 'D'.repeat(300), when);
         assert.ok(bytes(copy) <= 255, `name is ${bytes(copy)} bytes`);
         assert.ok(copy.startsWith('note (conflict 2026-09-18 1431 from DDD'));
+    });
+});
+
+describe('isConflictCopyOf', () => {
+    const when = new Date(2026, 8, 18, 14, 31);
+
+    it('pairs a copy with its note', () => {
+        const copy = conflictCopyPath('Daily/note.md', 'laptop', when);
+        assert.equal(isConflictCopyOf(copy, 'Daily/note.md'), true);
+        assert.equal(isConflictCopyOf(`${copy.slice(0, -3)} 2.md`, 'Daily/note.md'), true, 'numbered when taken');
+        assert.equal(isConflictCopyOf(copy, 'Daily/other.md'), false);
+        assert.equal(isConflictCopyOf('Daily/note.md', 'Daily/note.md'), false);
+    });
+
+    it('pairs a copy whose name was cut to fit with its note', () => {
+        const note = `Deep/${'N'.repeat(240)}.md`;
+        const copy = conflictCopyPath(note, 'laptop', when);
+        assert.equal(isConflictCopyOf(copy, note), true);
+        assert.equal(isConflictCopyOf(copy, copy), false, 'not with itself');
+        assert.equal(isConflictCopyOf(copy, `Other/${'N'.repeat(240)}.md`), false, 'not in another folder');
+        assert.equal(isConflictCopyOf(copy, `Deep/${'N'.repeat(240)}.txt`), false, 'not with another extension');
+    });
+
+    it('does not pair a copy with a longer note whose name would have fitted', () => {
+        const copy = conflictCopyPath('Plan.md', 'laptop', when);
+        assert.equal(isConflictCopyOf(copy, 'Plan for 2027.md'), false);
     });
 });
 
