@@ -135,7 +135,29 @@ Caveat from that test: the check sees the permissions the app sees. In a
 container or on a share the mount can present `0700` while the host has `0777`,
 and this cannot tell.
 
+
+## Verified on a real desktop (2026-11-03, X13, Obsidian 1.14.5 Flatpak)
+
+The keystore path cannot be exercised in the headless test container, so it was
+checked on a laptop with GNOME keyring running:
+
+| Check | Result |
+| --- | --- |
+| Secret Service on the session bus | `org.freedesktop.secrets` → `gnome-keyring-daemon` |
+| libsecret round-trip (store/lookup/clear) | works for the login user |
+| Existing Safe Storage entries | `chrome_libsecret_os_crypt_password_v2` present, so Electron has a real store |
+| `session.bin` after sign-in | 452 bytes, base64 ciphertext, **no** `accessToken`/`refreshToken`/`userKeyPassword` in plaintext |
+| Session left in Obsidian's secret storage | none: the leveldb holds the id string only, zero token material |
+| `sync-state.json` | `"accountEmail":"tag:2c412a28"` — no address |
+| Sync on that device | 45 files pulled; `README.md` byte-identical (sha256 `358b820c…`) to the NAS copy |
+| Self-integrity record | `plugin-self.json` written on first start |
+
+That closes the last open question from the earlier measurement: on a machine
+where the OS can encrypt, the plugin uses the encrypted file and leaves nothing
+readable behind, and sync still works.
+
 ## Not done yet
+
 
 
 - The desktop keystore path cannot be exercised in the headless test container
