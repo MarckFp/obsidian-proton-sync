@@ -9,6 +9,7 @@ import {
     checkExcludePatterns,
     conflictCopyOriginal,
     conflictCopyPath,
+    basename,
     isSafeName,
     isWithin,
     replacePrefix,
@@ -191,6 +192,45 @@ describe('conflictCopyPath', () => {
             conflictCopyPath('note.md', 'work/laptop:1', when),
             'note (conflict 2026-09-18 1431 from work-laptop-1).md',
         );
+    });
+
+    const bytes = (value: string) => new TextEncoder().encode(value).length;
+
+    it('keeps a long name inside what the filesystem allows, suffix and extension intact', () => {
+        const copy = conflictCopyPath(`${'N'.repeat(240)}.md`, 'ThinkPad-X13', when);
+        assert.ok(bytes(copy) <= 255, `name is ${bytes(copy)} bytes`);
+        assert.ok(copy.endsWith(' (conflict 2026-09-18 1431 from ThinkPad-X13).md'));
+        const stem = copy.slice(0, copy.indexOf(' (conflict'));
+        assert.equal(stem, 'N'.repeat(stem.length), 'only the stem gives way');
+        assert.ok(stem.length > 180, `kept most of the title (${stem.length} chars)`);
+    });
+
+    it('counts bytes, not characters, so Czech titles are cut early enough', () => {
+        const stem = 'Příliš žluťoučký kůň úpěl ďábelské ódy '.repeat(6);
+        const copy = conflictCopyPath(`${stem}.md`, 'laptop', when);
+        assert.ok(bytes(copy) <= 255, `name is ${bytes(copy)} bytes`);
+        assert.ok(copy.endsWith(' (conflict 2026-09-18 1431 from laptop).md'));
+        // A cut through a multi-byte character would leave U+FFFD behind.
+        assert.ok(!copy.includes('\uFFFD'), 'cut on a character boundary');
+        assert.equal(bytes(copy), bytes(copy.normalize('NFC')));
+    });
+
+    it('leaves room for the " 2" the engine adds when the copy name is taken', () => {
+        const copy = conflictCopyPath(`${'N'.repeat(250)}.md`, 'laptop', when);
+        const deduped = copy.replace('.md', ' 2.md');
+        assert.ok(bytes(deduped) <= 255, `deduped name is ${bytes(deduped)} bytes`);
+    });
+
+    it('keeps the folder, and shortens only the name', () => {
+        const copy = conflictCopyPath(`Deep/Nested/Folder/${'N'.repeat(240)}.md`, 'laptop', when);
+        assert.ok(copy.startsWith('Deep/Nested/Folder/'));
+        assert.ok(bytes(basename(copy)) <= 255);
+    });
+
+    it('caps an absurd device name instead of the note', () => {
+        const copy = conflictCopyPath('note.md', 'D'.repeat(300), when);
+        assert.ok(bytes(copy) <= 255, `name is ${bytes(copy)} bytes`);
+        assert.ok(copy.startsWith('note (conflict 2026-09-18 1431 from DDD'));
     });
 });
 
