@@ -209,14 +209,68 @@ function globToRegExp(pattern: string): RegExp {
  * The device name and timestamp are in the filename because that is the only
  * place they survive: the file has to be recognisable months later, from any
  * device, without consulting the plugin's own state.
+ *
+ * The name is capped so that writing it cannot fail on the filesystem's own
+ * limit — see {@link NAME_MAX_BYTES}. The suffix and the extension are what
+ * makes the copy recognisable, so the stem is what gives way.
  */
 export function conflictCopyPath(path: string, deviceName: string, when: Date): string {
     const { stem, extension } = splitExtension(path);
     const stamp = formatConflictTimestamp(when);
-    const device = sanitiseForFilename(deviceName);
+    const device = truncateToBytes(sanitiseForFilename(deviceName), MAX_DEVICE_BYTES);
     const suffix = device ? `${stamp} from ${device}` : stamp;
-    return `${stem} (conflict ${suffix})${extension}`;
+    const tail = ` (conflict ${suffix})${extension}`;
+    const room = NAME_MAX_BYTES - byteLength(tail) - DEDUPE_RESERVE_BYTES;
+    const name = truncateToBytes(basename(stem), Math.max(room, MIN_STEM_BYTES));
+    return joinPath(parentPath(stem), `${name}${tail}`);
 }
+
+/**
+ * Longest a single name may be, in bytes, on the filesystems Obsidian runs on:
+ * `NAME_MAX` is 255 on ext4, APFS, F2FS and XFS. NTFS counts UTF-16 characters
+ * rather than bytes, so a byte limit is the stricter of the two and is what this
+ * uses — the same number, one rule.
+ */
+export const NAME_MAX_BYTES = 255;
+
+/** Room left for the ` 2`, ` 3`… {@link SyncEngine} appends when a copy name is taken. */
+const DEDUPE_RESERVE_BYTES = 8;
+
+/** How much of the device name a copy keeps when the note's own name leaves little room. */
+const MAX_DEVICE_BYTES = 32;
+
+/** Never shorten a stem to nothing, even when the device name alone nearly fills the name. */
+const MIN_STEM_BYTES = 8;
+
+const utf8 = new TextEncoder();
+
+function byteLength(value: string): number {
+    return utf8.encode(value).length;
+}
+
+/**
+ * `value` cut to at most `maxBytes` of UTF-8, on a character boundary so the
+ * result is still valid text.
+ */
+function truncateToBytes(value: string, maxBytes: number): string {
+    if (byteLength(value) <= maxBytes) {
+        return value;
+    }
+    let used = 0;
+    let out = '';
+    // Iterating the string yields whole code points, so a surrogate pair is
+    // never split down the middle.
+    for (const char of value) {
+        const size = byteLength(char);
+        if (used + size > maxBytes) {
+            break;
+        }
+        out += char;
+        used += size;
+    }
+    return out;
+}
+
 
 function formatConflictTimestamp(when: Date): string {
     const pad = (value: number) => String(value).padStart(2, '0');
