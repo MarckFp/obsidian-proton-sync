@@ -6,6 +6,7 @@ import type { NoteVersion } from '../sync/engine';
 import { isTextPath } from '../sync/media';
 import { basename, conflictCopyOriginal, isConflictCopyOf, parentPath } from '../sync/paths';
 import { DiffModal, type DiffOptions } from './diffModal';
+import { getRuntime } from '../runtime';
 
 /**
  * Show a conflict waiting on a decision as a diff of this device's version
@@ -17,7 +18,7 @@ export function compareWithDrive(plugin: ProtonDriveSyncPlugin, path: string, on
         return;
     }
     const resolve = (policy: 'keep-both' | 'prefer-local' | 'prefer-remote') => async () => {
-        await plugin.engine.resolveConflict(path, policy);
+        await getRuntime().engine.resolveConflict(path, policy);
         new Notice(`Resolved "${path}".`);
         onResolved();
     };
@@ -29,7 +30,7 @@ export function compareWithDrive(plugin: ProtonDriveSyncPlugin, path: string, on
         load: async () => {
             const [oldText, remote] = await Promise.all([
                 readIfExists(plugin.app, path),
-                plugin.engine.readRemoteVersion(path, MAX_MERGE_BYTES),
+                getRuntime().engine.readRemoteVersion(path, MAX_MERGE_BYTES),
             ]);
             return { oldText, newText: remote === null ? '' : new TextDecoder().decode(remote) };
         },
@@ -182,7 +183,7 @@ export function versionComparison(plugin: ProtonDriveSyncPlugin, path: string, v
                 `Replace "${name}" with its version from ${when}. The version it replaces stays in ` +
                 'Drive’s history, so this can be undone the same way.',
             ...(unsynced !== undefined && { warning: unsynced }),
-            restore: async () => restore(await plugin.engine.readVersion(version.uid)),
+            restore: async () => restore(await getRuntime().engine.readVersion(version.uid)),
         };
     }
 
@@ -195,7 +196,7 @@ export function versionComparison(plugin: ProtonDriveSyncPlugin, path: string, v
             newLabel: `Version from ${when}`,
             ...(unsynced !== undefined && { warning: unsynced }),
             load: async () => {
-                versionData = await plugin.engine.readVersion(version.uid);
+                versionData = await getRuntime().engine.readVersion(version.uid);
                 return { oldText: await readIfExists(plugin.app, path), newText: new TextDecoder().decode(versionData) };
             },
             actions: [
@@ -203,7 +204,7 @@ export function versionComparison(plugin: ProtonDriveSyncPlugin, path: string, v
                     label: 'Restore this version',
                     keeps: 'added',
                     run: async () => {
-                        await restore(versionData ?? (await plugin.engine.readVersion(version.uid)));
+                        await restore(versionData ?? (await getRuntime().engine.readVersion(version.uid)));
                     },
                 },
             ],
