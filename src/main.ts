@@ -23,7 +23,7 @@ import { ConflictHistory } from './sync/conflictHistory';
 import { decryptLegacySession, ObsidianSecretSlot } from './proton/secretStore';
 import { ProtonSession } from './proton/session';
 import { DEFAULT_SETTINGS, type PluginSettings } from './settings';
-import type { ChosenFolder } from './ui/folderPickerModal';
+import { FolderPickerModal, type ChosenFolder } from './ui/folderPickerModal';
 import { DeviceList, DeviceRegistry, nextRequestAt, type DeviceRequest, type FolderMemory } from './sync/devices';
 import { DriveIO, sharedWithOthers } from './sync/drive';
 import { SyncEngine, type ConflictEvent, type OpenEditor, type SyncPlan, type SyncSummary } from './sync/engine';
@@ -725,7 +725,21 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             this.openSetup();
             return;
         }
+        if (this.summary.status === 'folder-missing') {
+            this.chooseFolder();
+            return;
+        }
         await this.engine.syncNow();
+    }
+
+    /** Pick another Drive folder for the vault, as the settings tab does. */
+    private chooseFolder(): void {
+        new FolderPickerModal(
+            this.app,
+            this.session.getClient(),
+            (folder) => void this.setRemoteFolder(folder),
+            this.logger.getLogger('folder-picker'),
+        ).open();
     }
 
     private openSettings(): void {
@@ -1068,6 +1082,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     private onSyncChange(summary: SyncSummary): void {
+        if (summary.status === 'folder-missing' && this.summary.status !== 'folder-missing') {
+            this.notify(
+                `${summary.lastError ?? 'the Drive folder this vault syncs with is missing'}. Nothing syncs until it is ` +
+                    'restored on Proton Drive, or another folder is chosen: click the status bar item, or Choose folder in the sync panel.',
+            );
+        }
         this.showStatus(summary);
         this.devices.noteStatus(summary);
     }

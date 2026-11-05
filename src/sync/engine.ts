@@ -161,6 +161,18 @@ export class SyncEngine {
 
     private running = false;
     private status: SyncStatus = 'signed-out';
+    /**
+     * Why the synced folder is missing, when it is: in Drive's trash, or gone
+     * altogether (deleted for good, or no longer shared with this account).
+     * Retrying paths cannot help then, so nothing syncs; see {@link rootNode}.
+     */
+    private folderMissing: 'trashed' | 'gone' | null = null;
+    /**
+     * Why each path in the retry queue last failed, so the sync panel can say
+     * more than how often. Kept in memory only: after a restart a path shows
+     * its count alone until it fails again.
+     */
+    private readonly failureReasons = new Map<string, string>();
     private lastSyncedAt: number | null = null;
     private lastError: string | null = null;
     private paused = false;
@@ -318,7 +330,9 @@ export class SyncEngine {
                 add(retry.path, 'waiting');
             } else {
                 const next = retry.after <= now ? 'with the next check' : `in ${formatWait(retry.after - now)}`;
-                add(retry.path, 'retrying', `failed ${retry.attempts} time${retry.attempts === 1 ? '' : 's'}; next try ${next}`);
+                const reason = this.failureReasons.get(retry.path);
+                const count = `failed ${retry.attempts} time${retry.attempts === 1 ? '' : 's'}`;
+                add(retry.path, 'retrying', `${reason ? `${count}: ${reason}` : count}; next try ${next}`);
             }
         }
         for (const path of this.batcher.pendingPaths()) {
@@ -401,6 +415,8 @@ export class SyncEngine {
         this.resolver = this.createResolver(this.drive, this.settings.conflictPolicy);
         this.rootUid = rootUid;
         this.running = true;
+        this.folderMissing = null;
+        this.failureReasons.clear();
         this.paused = this.settings.paused;
         this.abortController = new AbortController();
         // Opening Obsidian is activity: check at the active pace for a while.
@@ -630,7 +646,11 @@ export class SyncEngine {
             // Where the event feed stands, taken before the listing, so that
             // a change made while the tree is walked is still replayed by the
             // next poll rather than skipped over.
-            const scopeId = (await drive.getNode(rootUid)).treeEventScopeId;
+            const root = await this.rootNode();
+            if (root === null) {
+                return false;
+            }
+            const scopeId = root.treeEventScopeId;
             await this.refreshSharing(() => drive.sharedWithOthers(rootUid));
             if (this.state.getEventCursor(scopeId) === null) {
                 const latest = await drive.latestEventId(scopeId);
@@ -711,6 +731,11 @@ export class SyncEngine {
             // A full pass settles everything earlier polls could not, so only
             // what failed in it, or could not be established, stays queued.
             this.state.clearRetries();
+            for (const path of [...this.failureReasons.keys()]) {
+                if (!failed.includes(path)) {
+                    this.failureReasons.delete(path);
+                }
+            }
             for (const path of [...failed, ...skip]) {
                 this.state.retry(path);
             }
@@ -770,7 +795,11 @@ export class SyncEngine {
 
         let scopeId: string;
         try {
-            scopeId = (await drive.getNode(rootUid)).treeEventScopeId;
+            const root = await this.rootNode();
+            if (root === null) {
+                return;
+            }
+            scopeId = root.treeEventScopeId;
         } catch {
             // Let the full sync report it, and set the status to match.
             await this.fullSync();
@@ -851,6 +880,10 @@ export class SyncEngine {
         if (!this.drive || !this.rootUid || !this.running) {
             return;
         }
+        if (this.folderMissing !== null) {
+            // The full sync that runs once the folder is back covers these.
+            return;
+        }
         if (this.networkHeld()) {
             for (const path of paths) {
                 this.state.retry(path, { backoff: false });
@@ -875,6 +908,7 @@ export class SyncEngine {
                     this.state.retry(path);
                 } else if (!this.heldForRetry.has(path)) {
                     this.state.clearRetry(path);
+                    this.failureReasons.delete(path);
                 }
             }
             this.heldForRetry.clear();
@@ -886,6 +920,7 @@ export class SyncEngine {
         } catch (error) {
             for (const path of paths) {
                 this.state.retry(path);
+                this.failureReasons.set(path, errorMessage(error));
             }
             this.reportFailure('Sync failed', error);
         } finally {
@@ -1021,6 +1056,7 @@ export class SyncEngine {
             await runPooled(work, SCAN_CONCURRENCY, (error, index) => {
                 this.logger.error(`Failed to sync "${ordered[index]}"`, error);
                 this.lastError = errorMessage(error);
+                this.failureReasons.set(ordered[index], errorMessage(error));
                 failed.push(ordered[index]);
             });
         } finally {
@@ -2312,7 +2348,14 @@ export class SyncEngine {
     private async pollRemoteEvents(): Promise<void> {
         const drive = this.drive;
         const scopeId = this.treeEventScopeId;
-        if (!drive || !scopeId || !this.running || !this.settings.autoSync) {
+        if (!drive || !this.running || !this.settings.autoSync) {
+            return;
+        }
+        if (this.folderMissing !== null && !this.networkHeld()) {
+            await this.recheckMissingFolder();
+            return;
+        }
+        if (!scopeId) {
             return;
         }
         if (this.networkHeld()) {
@@ -2351,6 +2394,19 @@ export class SyncEngine {
             // Events read before the failure are still good; handle them and
             // resume from the last one next time.
             readError = error;
+        }
+
+        // The folder itself moved to the trash or was deleted: stop here, with
+        // the cursor where it was, rather than handle its contents as gone.
+        if (readError === null && events.some((event) => event.nodeUid === this.rootUid)) {
+            try {
+                if ((await this.rootNode()) === null) {
+                    await this.state.flush();
+                    return;
+                }
+            } catch (error) {
+                readError = error;
+            }
         }
 
         // A full sync asked for by Drive, or a change that could not be looked
@@ -2743,6 +2799,79 @@ export class SyncEngine {
         return this.queue;
     }
 
+    /**
+     * The synced folder, or null when it is missing: in Drive's trash, deleted
+     * for good, or no longer shared with this account. A missing folder stops
+     * the sync until it is back, rather than every path failing on its own,
+     * uploads landing in the trash, or the same error repeating each poll.
+     * A failed lookup throws, as before.
+     *
+     * The SDK answers from its cache until Drive's events say otherwise, so a
+     * folder trashed while Obsidian was closed can look present until the
+     * events are read; the event for the folder itself brings it here.
+     */
+    private async rootNode(): Promise<NodeEntity | null> {
+        const rootUid = this.rootUid!;
+        const found = await this.drive!.lookupNodes([rootUid]);
+        if (!found.has(rootUid)) {
+            throw new Error('Drive did not answer for the synced folder');
+        }
+        const node = found.get(rootUid) ?? null;
+        if (node === null || node.trashTime !== undefined) {
+            this.markFolderMissing(node === null ? 'gone' : 'trashed', node?.treeEventScopeId);
+            return null;
+        }
+        if (this.folderMissing !== null) {
+            this.logger.info('The synced Drive folder is back; syncing again');
+            this.folderMissing = null;
+            this.lastError = null;
+        }
+        return node;
+    }
+
+    private markFolderMissing(kind: 'trashed' | 'gone', scopeId?: string): void {
+        if (scopeId !== undefined) {
+            // Kept so its events can still be read, which is how a folder
+            // restored from the trash is noticed; see recheckMissingFolder.
+            this.treeEventScopeId = scopeId;
+        }
+        const message =
+            kind === 'trashed'
+                ? 'The Drive folder this vault syncs with is in the trash on Proton Drive'
+                : 'The Drive folder this vault syncs with no longer exists, or is no longer shared with you';
+        if (this.folderMissing !== kind) {
+            this.logger.warn(`${message}; nothing syncs until it is restored or another folder is chosen`);
+        }
+        this.folderMissing = kind;
+        this.lastError = message;
+        this.setStatus('folder-missing');
+    }
+
+    /**
+     * While the synced folder is missing: read Drive's events, which is what
+     * brings the SDK's copy of the folder up to date, and look again. A folder
+     * restored from the trash gets a full sync, which also picks up anything
+     * changed here in the meantime. The events are only read, not applied, and
+     * the cursor stays put.
+     */
+    private async recheckMissingFolder(): Promise<void> {
+        const drive = this.drive!;
+        const scopeId = this.treeEventScopeId;
+        try {
+            if (scopeId !== null) {
+                const cursor = this.state.getEventCursor(scopeId) ?? undefined;
+                for await (const event of drive.iterateEvents(scopeId, cursor, this.abortController?.signal)) {
+                    void event;
+                }
+            }
+            if ((await this.rootNode()) !== null) {
+                await this.fullSync();
+            }
+        } catch (error) {
+            this.logger.debug('Could not check on the missing Drive folder', error);
+        }
+    }
+
     private reportFailure(message: string, error: unknown): void {
         this.logger.error(message, error);
         this.lastError = errorMessage(error);
@@ -2750,6 +2879,10 @@ export class SyncEngine {
     }
 
     private setStatus(status: SyncStatus): void {
+        if (this.folderMissing !== null) {
+            // Nothing else is true until the folder is back or replaced.
+            status = 'folder-missing';
+        }
         this.status = status === 'idle' && this.paused ? 'paused' : status;
         this.hooks.onChange(this.getSummary());
     }

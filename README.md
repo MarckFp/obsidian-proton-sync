@@ -50,8 +50,13 @@ same implementation Proton's own clients use.
   at is in sync: pulsing green when it is, red when it has changes not synced
   yet. On mobile the same dot sits in each note's header.
 - **Nothing fails to sync unseen.** The sync panel lists every change not
-  synced yet, and why: waiting for Wi-Fi, retrying after a failure, too large
-  for this device, waiting on a conflict decision.
+  synced yet, and why: waiting for Wi-Fi, retrying after a failure (with the
+  error it got), too large for this device, waiting on a conflict decision.
+- **If the Drive folder goes missing**, moved to the trash, deleted, or no
+  longer shared with you, syncing stops and says so, rather than retrying
+  every note. Your notes in the vault are left as they are. Restore the folder
+  on Proton Drive and syncing picks up again by itself, or choose another
+  folder with **Choose folder** in the sync panel or by clicking the status bar.
 - **Edits arriving while you type are merged in.** A new version of a note you
   have open is brought into the editor without moving the cursor, and if you
   have unsaved typing, merged with it rather than written underneath it.

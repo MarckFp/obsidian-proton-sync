@@ -46,6 +46,13 @@ const PRESENTATION: Record<SyncStatus, Presentation> = {
         label: 'Sync locked',
         description: 'Your sign-in is protected with a PIN. Enter it to start syncing.',
     },
+    'folder-missing': {
+        icon: 'folder-x',
+        label: 'Drive folder missing',
+        description:
+            'The Drive folder this vault syncs with is in the trash or no longer exists, so nothing syncs. ' +
+            'Restore it on Proton Drive, or choose another folder. Your notes here are untouched.',
+    },
     connecting: {
         icon: 'refresh-cw',
         label: 'Connecting',

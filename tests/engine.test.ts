@@ -1977,6 +1977,95 @@ describe('SyncEngine — names the vault spells differently (issue #27)', () => 
     });
 });
 
+describe('SyncEngine — the synced Drive folder going missing (issue #33)', () => {
+    /** A vault synced with two notes, its engine stopped, as when Obsidian closes. */
+    async function syncedThenClosed() {
+        const vault = new MemoryVault();
+        const drive = new FakeDrive();
+        vault.write('a.md', 'A');
+        vault.write('b.md', 'B');
+        const first = await setup({ vault, drive });
+        await first.settled();
+        await first.engine.stop();
+        return { vault, drive };
+    }
+
+    it('stops, and says why, when the folder went to the trash while Obsidian was closed', async () => {
+        const { vault, drive } = await syncedThenClosed();
+        drive.nodes.get(SYNC_ROOT)!.trashed = true;
+        vault.write('a.md', 'A edited');
+
+        const { engine, state, settled } = await setup({ vault, drive });
+        await settled();
+
+        const summary = engine.getSummary();
+        assert.equal(summary.status, 'folder-missing');
+        assert.match(summary.lastError ?? '', /in the trash/);
+        assert.equal(drive.text('a.md'), 'A', 'nothing uploaded into the trashed folder');
+        assert.deepEqual(vault.notePaths(), ['a.md', 'b.md']);
+        assert.equal(vault.read('a.md'), 'A edited');
+        assert.deepEqual(state.retryEntries(), [], 'nothing queued to fail again and again');
+    });
+
+    it('stops, and says why, when the folder was deleted for good', async () => {
+        const { vault, drive } = await syncedThenClosed();
+        for (const [uid, node] of [...drive.nodes]) {
+            if (uid === SYNC_ROOT || node.parentUid === SYNC_ROOT) {
+                drive.nodes.delete(uid);
+            }
+        }
+
+        const { engine, settled } = await setup({ vault, drive });
+        await settled();
+        engine.pollNow();
+        await settled();
+
+        assert.equal(engine.getSummary().status, 'folder-missing');
+        assert.match(engine.getSummary().lastError ?? '', /no longer exists/);
+        assert.deepEqual(vault.notePaths(), ['a.md', 'b.md']);
+    });
+
+    it('notices the folder going to the trash while syncing, and carries on once it is restored', async () => {
+        const { vault, drive, engine, settled } = await setup();
+        vault.write('a.md', 'A');
+        engine.onVaultChange('a.md');
+        await settled();
+
+        const root = drive.nodes.get(SYNC_ROOT)!;
+        root.trashed = true;
+        drive.emit(root);
+        engine.pollNow();
+        await settled();
+        assert.equal(engine.getSummary().status, 'folder-missing');
+
+        vault.write('a.md', 'A edited');
+        engine.onVaultChange('a.md');
+        await settled();
+        assert.equal(drive.text('a.md'), 'A', 'held while the folder is missing');
+
+        root.trashed = false;
+        drive.emit(root);
+        engine.pollNow();
+        await settled();
+        assert.equal(engine.getSummary().status, 'idle');
+        assert.equal(drive.text('a.md'), 'A edited', 'the change made meanwhile goes up once it is back');
+    });
+
+    it('says why a path keeps failing, not only how often', async () => {
+        const { vault, drive, engine, settled } = await setup();
+        drive.duringNewFileUpload = () => {
+            throw new Error('Parent folder is locked');
+        };
+        vault.write('a.md', 'A');
+        engine.onVaultChange('a.md');
+        await settled();
+
+        const change = engine.pendingChanges().find((pending) => pending.path === 'a.md');
+        assert.equal(change?.reason, 'retrying');
+        assert.match(change?.detail ?? '', /^failed 1 time: Parent folder is locked; next try/);
+    });
+});
+
 describe('SyncEngine — the device list', () => {
     const RECORD = `${DEVICES_FOLDER}/device-laptop.json`;
 
