@@ -3,6 +3,8 @@
 // load time.
 import './polyfills';
 
+import { requireUi, uiProof } from './security/capability';
+
 import {
     apiVersion,
     type App,
@@ -156,7 +158,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                     versionsKey: (path) => this.engine.versionsKey(path),
                     noteVersions: (path) => this.engine.noteVersions(path),
                     compareVersion: (path, version) => versionComparison(this, path, version),
-                    shareNote: (path) => this.shareNote(path),
+                    shareNote: (path) => this.shareNote(path, uiProof()),
                     recentlyDeleted: () => this.engine.recentlyDeleted(),
                     restoreDeleted: async (item) => {
                         await this.engine.restoreDeleted(item);
@@ -518,7 +520,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     /** Sign out, with the PIN first when there is one; see {@link endSession}. */
-    async signOut(): Promise<void> {
+    async signOut(proof?: string): Promise<void> {
+        // Only this plugin's interface may end the session; see security/capability.ts.
+        requireUi(proof, 'signing out');
         if (!(await this.confirmPin('sign out'))) {
             return;
         }
@@ -1007,7 +1011,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                     return false;
                 }
                 if (!checking) {
-                    this.shareNote(file.path);
+                    this.shareNote(file.path, uiProof());
                 }
                 return true;
             },
@@ -1044,7 +1048,10 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     }
 
     /** The note's public link on Drive, with Copy and Stop sharing, or a form to make one. */
-    shareNote(path: string): void {
+    shareNote(path: string, proof?: string): void {
+        // A public link is exfiltration with the user's own keys: only this
+        // plugin's UI may ask for one. See security/capability.ts.
+        requireUi(proof, 'a share link');
         new ShareModal(this.app, path, {
             load: () => this.engine.noteShareLink(path),
             create: (options) => this.engine.createNoteShareLink(path, options),
@@ -1239,7 +1246,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
      * applies. Through the editor when the note is open, so the cursor stays
      * and nothing typed meanwhile is written over; else through the vault.
      */
-    async restoreVersion(path: string, data: ArrayBuffer): Promise<void> {
+    async restoreVersion(path: string, data: ArrayBuffer, proof?: string): Promise<void> {
+        requireUi(proof, 'restoring an old version');
         const file = this.app.vault.getFileByPath(path);
         if (!file) {
             throw new Error('the note no longer exists');
