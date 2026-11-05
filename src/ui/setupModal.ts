@@ -3,6 +3,7 @@ import { App, Modal, Setting } from 'obsidian';
 import type ProtonDriveSyncPlugin from '../main';
 import { FolderPickerModal } from './folderPickerModal';
 import { SignInModal } from './signInModal';
+import { getRuntime } from '../runtime';
 
 /**
  * First-run setup: sign in, pick the Drive folder, choose what to sync,
@@ -44,7 +45,7 @@ export class SetupModal extends Modal {
         const { contentEl } = this;
         contentEl.empty();
 
-        const signedIn = this.plugin.session.isSignedIn();
+        const signedIn = getRuntime().session.isSignedIn();
         const { remoteFolderUid, remoteFolderPath } = this.plugin.settings;
 
         contentEl.createEl('p', {
@@ -57,7 +58,7 @@ export class SetupModal extends Modal {
             .setName('1. Sign in to Proton')
             .setDesc(
                 signedIn
-                    ? `Signed in as ${this.plugin.session.accountEmail ?? 'your Proton account'}.`
+                    ? `Signed in as ${getRuntime().session.accountEmail ?? 'your Proton account'}.`
                     : 'Opens Proton in your browser. This plugin never sees your password.',
             )
             .addButton((button) => {
@@ -85,10 +86,10 @@ export class SetupModal extends Modal {
                     .setButtonText(remoteFolderUid ? 'Change' : 'Choose')
                     .setDisabled(!signedIn)
                     .onClick(() => {
-                        new FolderPickerModal(this.app, this.plugin.session.getClient(), (folder) => {
+                        new FolderPickerModal(this.app, getRuntime().session.getClient(), (folder) => {
                             this.changed = true;
                             void this.plugin.setRemoteFolder(folder, { connect: false }).then(() => this.render());
-                        }, this.plugin.logger.getLogger('folder-picker')).open();
+                        }, getRuntime().logger.getLogger('folder-picker')).open();
                     });
                 if (signedIn && !remoteFolderUid) {
                     button.setCta();

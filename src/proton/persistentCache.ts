@@ -53,6 +53,17 @@ export class EncryptedEntitiesCache implements ProtonDriveCache<string> {
         private readonly marker: () => string,
         private readonly logger: Logger,
         private loadedMarker: string | null,
+        /**
+         * Which entries may be written to disk.
+         *
+         * The SDK caches whatever it has loaded, which includes folders outside
+         * the synced one — names the user browsed while choosing where the vault
+         * lives. Those are the only entries the vault does not already have on
+         * disk, so they are the only ones worth not keeping: everything inside
+         * the synced folder is a note the user has anyway. In-memory behaviour
+         * is unchanged; only what survives a restart is filtered.
+         */
+        private readonly inScope?: (key: string, tags: string[]) => boolean,
     ) {}
 
     /**
@@ -64,6 +75,8 @@ export class EncryptedEntitiesCache implements ProtonDriveCache<string> {
         rawKey: Uint8Array<ArrayBuffer>,
         marker: () => string,
         logger: Logger,
+        /** Which entries are worth keeping on disk; see {@link EncryptedEntitiesCache.inScope}. */
+        inScope?: (key: string, tags: string[]) => boolean,
     ): Promise<EncryptedEntitiesCache> {
         const key = await crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
         let loaded: { entries: StoredEntry[]; marker: string | null } = { entries: [], marker: null };
@@ -72,7 +85,7 @@ export class EncryptedEntitiesCache implements ProtonDriveCache<string> {
         } catch (error) {
             logger.warn('Could not read the saved Drive cache; starting without it', error);
         }
-        const cache = new EncryptedEntitiesCache(store, key, marker, logger, loaded.marker);
+        const cache = new EncryptedEntitiesCache(store, key, marker, logger, loaded.marker, inScope);
         try {
             for (const entry of loaded.entries) {
                 const value = await decrypt(key, entry);
@@ -123,6 +136,11 @@ export class EncryptedEntitiesCache implements ProtonDriveCache<string> {
         await this.memory.setEntity(key, value, tags);
         this.tags.set(key, tags);
         this.removed.delete(key);
+        if (this.inScope && !this.inScope(key, tags)) {
+            // Readable in this session, not worth keeping between them.
+            this.dirty.delete(key);
+            return;
+        }
         this.dirty.add(key);
         this.scheduleFlush();
     }
@@ -312,4 +330,51 @@ function fromBase64(text: string): Uint8Array<ArrayBuffer> {
         bytes[i] = binary.charCodeAt(i);
     }
     return bytes;
+}
+
+/**
+ * Which cache entries describe a node the vault actually syncs.
+ *
+ * The SDK keys a node `node-<uid>` and a volume `volume-<id>` (see
+ * `@protontech/drive-sdk/dist/internal/nodes/cache.js`), so the prefix has to
+ * come off before the uid is compared with what the state knows: comparing
+ * `node-<uid>` with a bare uid never matches, which quietly drops every entry
+ * and makes the cache useless.
+ *
+ * Everything without that prefix is either keyed by something that carries no
+ * names (volumes, shares, keys) or is a node outside the synced folder — the
+ * ones the user browsed while choosing where the vault would live. The vault
+ * already holds every name inside it, so only those are worth keeping.
+ */
+const NODE_KEY = /~[A-Za-z0-9_=-]{16,}$/;
+
+/** What the SDK puts in front of a node uid in a cache key. */
+const NODE_ENTRY = 'node-';
+
+/** The tag the SDK writes on a node entry naming its parent. */
+const PARENT_TAG = 'nodeParentUid:';
+
+export function nodeScope(nodes: () => Set<string>): (key: string, tags?: string[]) => boolean {
+    return (key: string, tags: string[] = []): boolean => {
+        if (!key.startsWith(NODE_ENTRY)) {
+            return true;
+        }
+        const uid = key.slice(NODE_ENTRY.length);
+        if (!NODE_KEY.test(uid)) {
+            return true;
+        }
+        const known = nodes();
+        if (known.size === 0) {
+            // Nothing reconciled yet: do not throw away a cache that is merely
+            // being rebuilt from.
+            return true;
+        }
+        if (known.has(uid)) {
+            return true;
+        }
+        // A child of a node the vault syncs is inside the synced folder even
+        // before the state records it: a file made a moment ago, the files in
+        // the `.devices` folder. The parent is named in the entry's own tags.
+        return tags.some((tag) => tag.startsWith(PARENT_TAG) && known.has(tag.slice(PARENT_TAG.length)));
+    };
 }
