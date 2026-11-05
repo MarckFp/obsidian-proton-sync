@@ -24,7 +24,7 @@ reading the code and hoping. See "Measurements".
 | Another plugin reading the session through `app.secretStorage` | **Partly** — closed on desktop with a keystore, impossible on mobile | session moved to an encrypted file of the plugin's own (`session.bin`), old secret cleared |
 | Another plugin reaching `plugins.plugins["proton-drive-sync"].session.getClient()` | **Yes** | session, engine, state, logger and the conflict queue live in module scope now, not on the plugin instance |
 | Another plugin reading note names and node ids out of the log buffer, the console, or a pasted report | **Yes** | every log line is redacted at the logger: `«file a1b2c3»`, `«node»` |
-| Another plugin reading the account address out of `sync-state.json` | **Yes** | the file stores a one-way tag instead of the address |
+| Another plugin reading the account address out of `sync-state.json` | **Yes** | the file stores an obscured tag (`tag:2c412a28`, a 32-bit hash) instead of the address; it keeps the address out of the file, and can be confirmed against a candidate address |
 | A file or token going to a host that is not Proton's | **Yes** | every request is parsed and refused unless the host is `proton.me` / `proton.ch` over HTTPS |
 | Another plugin reading the vault, and with it every synced note | No — **cannot be** | a plugin that can read files can read the vault; the sync is not the cause |
 | Another plugin capturing `Authorization` headers for every request in the app (Electron `webRequest`) | No — **cannot be, in this process** | needs a separate process for the network, which ends the "pure plugin" property and desktop-only |
@@ -83,9 +83,11 @@ notice never says are kept:
 - **the same version with different code** — an update does not produce that, so
   it means the bundle was replaced some other way;
 - **an update whose code starts mentioning credential APIs it did not mention
-  before** (`secretStorage`, `safeStorage`, `plugins.plugins`, this plugin's id)
-  — which is what "this plugin can now read the sign-in" looks like from the
-  outside.
+  before** (`safeStorage`, `plugins.plugins`, this plugin's id) — which is what
+  "this plugin can now read the sign-in" looks like from the outside.
+  `secretStorage` is deliberately not one of them: Obsidian recommends it for a
+  plugin's own API keys, so adopting it is not a security event, and warning
+  about it made the notice untrustworthy.
 
 Versions, additions and removals are still recorded (sha-256 of each `main.js`,
 not the version a plugin writes about itself) and folded away in Settings →
@@ -102,7 +104,8 @@ Measured on the rig, all three cases:
 | --- | --- |
 | a line appended, version untouched | `Attacker Probe — same version 1.0.0, different code — an update does not do that` |
 | `1.2.0 → 1.3.0`, ordinary code | no notice; `3 other plugin(s); nothing since the last start that Obsidian would not already tell you`, update listed under a fold |
-| `1.0.0 → 1.2.0` with a `secretStorage` reference added | `Share Probe — 1.0.0 → 1.2.0 now mentions secretStorage` |
+| `1.0.0 → 1.2.0` with a `safeStorage` reference added | `Share Probe — 1.0.0 → 1.2.0 now mentions safeStorage` |
+| `1.0.0 → 1.2.0` with a `secretStorage` reference added | no notice: plugins are told to use it for their own keys |
 
 
 ## Capability, not only credentials
@@ -123,6 +126,20 @@ restoreVersion("README.md", …)  -> Refusing restoring an old version: …
 ```
 
 Measured with a probe plugin that made exactly those three calls.
+
+## Tripwires, and what they are worth
+
+`security/tripwire.ts` wraps the shared `app.secretStorage` methods once and puts
+trap getters on the plugin instance for the names a hostile plugin tries first
+(`session`, `client`, `credentials`…). A call that touches this plugin's ids is
+attributed through the plugin frame in the stack (`plugin:<id>:<line>:<col>`, or
+`/plugins/<id>/main.js` on older builds) and recorded, in Settings and on disk.
+
+The wrappers are **restored in `onunload`**. Leaving them in place after a
+reload is worse than not having them: they keep calling the instance that was
+unloaded, and the "already installed" guard stops the new instance from wiring
+its own — so its report stays empty while the settings page claims to be
+watching.
 
 ## Who can write the code, and is it still the code
 
@@ -177,8 +194,13 @@ start without the cache 19 s, and the gap grows with the number of folders.
 
 It also held names the vault does not have on disk: folders browsed while
 choosing where the vault would live. Those entries are now dropped at write time
-(`persistentCache.nodeScope`): the cache keeps entries keyed by nodes the sync
-state knows, and entries that carry no names at all (shares, volumes, keys).
+(`persistentCache.nodeScope`). The SDK keys a node `node-<uid>` and a volume
+`volume-<id>`, so the filter strips that prefix and compares the uid with what
+the sync state knows; an entry is also kept when its own parent tag names a node
+the state knows, which covers a file made a moment ago and the files in
+`.devices`. The synced folder, the folders above it and `.devices` are handed to
+the filter explicitly, because they are read on every start but never reach the
+state. Entries that carry no names at all (shares, volumes, keys) are kept.
 In-memory behaviour is unchanged; only what survives a restart is filtered.
 
 Clearing the cache is no longer a security measure — whoever can read it can

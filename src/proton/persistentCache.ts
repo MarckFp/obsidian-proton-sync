@@ -335,16 +335,32 @@ function fromBase64(text: string): Uint8Array<ArrayBuffer> {
 /**
  * Which cache entries describe a node the vault actually syncs.
  *
- * Everything else the SDK caches is either keyed by something that carries no
- * names (shares, volumes, keys) or is a node outside the synced folder — the
+ * The SDK keys a node `node-<uid>` and a volume `volume-<id>` (see
+ * `@protontech/drive-sdk/dist/internal/nodes/cache.js`), so the prefix has to
+ * come off before the uid is compared with what the state knows: comparing
+ * `node-<uid>` with a bare uid never matches, which quietly drops every entry
+ * and makes the cache useless.
+ *
+ * Everything without that prefix is either keyed by something that carries no
+ * names (volumes, shares, keys) or is a node outside the synced folder — the
  * ones the user browsed while choosing where the vault would live. The vault
  * already holds every name inside it, so only those are worth keeping.
  */
 const NODE_KEY = /~[A-Za-z0-9_=-]{16,}$/;
 
-export function nodeScope(nodes: () => Set<string>): (key: string) => boolean {
-    return (key: string): boolean => {
-        if (!NODE_KEY.test(key)) {
+/** What the SDK puts in front of a node uid in a cache key. */
+const NODE_ENTRY = 'node-';
+
+/** The tag the SDK writes on a node entry naming its parent. */
+const PARENT_TAG = 'nodeParentUid:';
+
+export function nodeScope(nodes: () => Set<string>): (key: string, tags?: string[]) => boolean {
+    return (key: string, tags: string[] = []): boolean => {
+        if (!key.startsWith(NODE_ENTRY)) {
+            return true;
+        }
+        const uid = key.slice(NODE_ENTRY.length);
+        if (!NODE_KEY.test(uid)) {
             return true;
         }
         const known = nodes();
@@ -353,6 +369,12 @@ export function nodeScope(nodes: () => Set<string>): (key: string) => boolean {
             // being rebuilt from.
             return true;
         }
-        return known.has(key);
+        if (known.has(uid)) {
+            return true;
+        }
+        // A child of a node the vault syncs is inside the synced folder even
+        // before the state records it: a file made a moment ago, the files in
+        // the `.devices` folder. The parent is named in the entry's own tags.
+        return tags.some((tag) => tag.startsWith(PARENT_TAG) && known.has(tag.slice(PARENT_TAG.length)));
     };
 }

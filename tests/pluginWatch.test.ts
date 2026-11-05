@@ -70,20 +70,26 @@ describe('what is worth interrupting the user for', () => {
     it('reports an update that starts reaching for credential APIs', () => {
         const alerts = alertsFrom(
             [plugin('a', '1.0.0', 'aaaa', [])],
-            [plugin('a', '1.1.0', 'bbbb', ['secretStorage'])],
+            [plugin('a', '1.1.0', 'bbbb', ['safeStorage'])],
         );
         assert.equal(alerts.length, 1);
         assert.equal(alerts[0].reason, 'new-capability');
-        assert.match(alerts[0].why, /now mentions secretStorage/);
+        assert.match(alerts[0].why, /now mentions safeStorage/);
+    });
+
+    it('says nothing when a plugin merely starts using secret storage, which plugins are told to use', () => {
+        const before = plugin('a', '1.0.0', 'aaaa', capabilitiesIn('function add(a, b) { return a + b; }'));
+        const after = plugin('a', '1.1.0', 'bbbb', capabilitiesIn('app.secretStorage.setSecret("api-key", k)'));
+        assert.deepEqual(alertsFrom([before], [after]), []);
     });
 
     it('does not re-report a capability the plugin already had', () => {
         const alerts = alertsFrom(
-            [plugin('a', '1.0.0', 'aaaa', ['secretStorage'])],
-            [plugin('a', '1.1.0', 'bbbb', ['secretStorage', 'safeStorage'])],
+            [plugin('a', '1.0.0', 'aaaa', ['safeStorage'])],
+            [plugin('a', '1.1.0', 'bbbb', ['safeStorage', 'plugins.plugins'])],
         );
         assert.equal(alerts.length, 1);
-        assert.match(alerts[0].why, /now mentions safeStorage$/);
+        assert.match(alerts[0].why, /now mentions plugins\.plugins$/);
     });
 
     it('says nothing about a plugin that was just installed or removed', () => {
@@ -98,7 +104,7 @@ describe('what is worth interrupting the user for', () => {
 
     it('finds the API names in a bundle, and only those', () => {
         const bundle = 'app.secretStorage.getSecret(x); app.plugins.plugins["y"]; electron.safeStorage';
-        assert.deepEqual(capabilitiesIn(bundle).sort(), ['plugins.plugins', 'safeStorage', 'secretStorage']);
+        assert.deepEqual(capabilitiesIn(bundle).sort(), ['plugins.plugins', 'safeStorage']);
         assert.deepEqual(capabilitiesIn('function add(a,b){return a+b}'), []);
     });
 });

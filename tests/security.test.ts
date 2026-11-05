@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 
 import { assertProtonUrl } from '../src/proton/endpoints';
 import { migrateSecret, ObsidianSecretSlot, SafeStorageFileSlot } from '../src/proton/secretStore';
-import { redactNames, setLogShowsNames, Logger } from '../src/util/logger';
+import { redactArgument, redactNames, setLogShowsNames, Logger } from '../src/util/logger';
 
 function memoryAdapter() {
     const files = new Map<string, string>();
@@ -66,6 +66,38 @@ describe('the log never carries note names by default', () => {
         setLogShowsNames(true);
         assert.match(redactNames('Projekty/Trisula/Poznámky.md'), /Trisula/);
         setLogShowsNames(false);
+    });
+
+    it('leaves hosts and API paths alone: they name an endpoint, not a note', () => {
+        setLogShowsNames(false);
+        const line = 'GET https://drive-api.proton.me/drive/volumes/x/links 200 (351ms)';
+        assert.equal(redactNames(line), line);
+        assert.equal(redactNames('GET /drive/volumes/x/links 200'), 'GET /drive/volumes/x/links 200');
+        assert.equal(redactNames('drive-api.proton.me'), 'drive-api.proton.me');
+    });
+
+    it('keeps the stack of an error, redacted, instead of throwing it away', () => {
+        setLogShowsNames(false);
+        const error = new Error('Could not upload a file');
+        error.stack = 'Error: Could not upload a file\n    at upload (/vault/Tajné/poznámka.md:10:2)';
+        const copy = redactArgument(error) as Error;
+        assert.ok(copy instanceof Error);
+        assert.equal(copy.stack?.includes('Tajné'), false, String(copy.stack));
+        // The frame is what a bug report needs; only the name goes.
+        assert.match(String(copy.stack), /at upload/);
+    });
+
+    it('redacts the strings inside a plain object, and keeps its shape', () => {
+        setLogShowsNames(false);
+        const copy = redactArgument({
+            path: 'Tajné/poznámka.md',
+            size: 12,
+            nested: { name: 'Tajné/druhá.md' },
+        }) as Record<string, unknown>;
+        assert.equal(copy.size, 12);
+        assert.equal(String(copy.path).includes('Tajné'), false, String(copy.path));
+        const nested = copy.nested as Record<string, unknown>;
+        assert.equal(String(nested.name).includes('Tajné'), false, String(nested.name));
     });
 
     it('redacts what reaches the buffer and the console alike', () => {

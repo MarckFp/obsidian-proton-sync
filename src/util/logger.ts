@@ -30,11 +30,26 @@ const TOKEN = /[^\s"']+/g;
 /** Drive node uids are opaque, but long, stable, and they identify a file across devices. */
 const NODE_UID = /[A-Za-z0-9_+/=~-]{60,}/g;
 
+/**
+ * A host, as opposed to a file name.
+ *
+ * `drive-api.proton.me` is not the user's data and redacting it makes a bug
+ * report undiagnosable, so it is left alone. Two labels are ambiguous
+ * (`note.md` is a file, `proton.me` is a host), so only three or more are
+ * treated as a host; the vault's own names almost never look like that.
+ */
+const HOST = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.){2,}[a-z]{2,24}$/i;
+
 function looksLikeName(value: string): boolean {
     if (!/[A-Za-z]/.test(value)) {
         return false;
     }
     const core = value.replace(/[.,;:)\]}]+$/, '');
+    // A URL, a host, or an API path names an endpoint, not a note. Vault paths
+    // are relative (`Projekty/Trisula.md`); a leading slash is Drive's API.
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(core) || core.startsWith('/') || HOST.test(core)) {
+        return false;
+    }
     return core.includes('/') || /\.[A-Za-z0-9]{1,8}$/.test(core);
 }
 
@@ -50,6 +65,54 @@ export function redactNames(text: string): string {
     });
     const withoutUids = quoted.replace(NODE_UID, '«node»');
     return withoutUids.replace(TOKEN, (match) => (looksLikeName(match) ? token(match) : match));
+}
+
+/** An error with its message and stack redacted — the stack kept, not thrown away. */
+function redactError(error: Error): Error {
+    const copy = new Error(redactNames(error.message));
+    copy.name = redactNames(error.name);
+    // A bug report starts at the stack. Dropping it made the redacted log
+    // useless for the case the log exists for, so redact it instead.
+    if (typeof error.stack === 'string') {
+        copy.stack = redactNames(error.stack);
+    }
+    const cause = (error as { cause?: unknown }).cause;
+    if (cause !== undefined) {
+        (copy as { cause?: unknown }).cause = redactArgument(cause);
+    }
+    return copy;
+}
+
+/**
+ * A log argument with the names inside it redacted and its shape kept.
+ *
+ * Errors used to lose their stack, and plain objects were passed through
+ * untouched, so an SDK error carrying a path in a field went into the buffer
+ * and onto the clipboard as it was.
+ */
+export function redactArgument(value: unknown, depth = 0): unknown {
+    if (typeof value === 'string') {
+        return redactNames(value);
+    }
+    if (value instanceof Error) {
+        return redactError(value);
+    }
+    if (depth >= 2) {
+        // Deep enough: an SDK object graph is not worth walking, and its
+        // credentials are not in the log's scope.
+        return value;
+    }
+    if (Array.isArray(value)) {
+        return value.map((item) => redactArgument(item, depth + 1));
+    }
+    if (value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+        const copy: Record<string, unknown> = {};
+        for (const [key, inner] of Object.entries(value)) {
+            copy[key] = redactArgument(inner, depth + 1);
+        }
+        return copy;
+    }
+    return value;
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -119,17 +182,7 @@ export class Logger {
         }
 
         const safeMessage = redactNames(message);
-        const safeArgs = args.map((arg) => {
-            if (typeof arg === "string") {
-                return redactNames(arg);
-            }
-            if (arg instanceof Error) {
-                const copy = new Error(redactNames(arg.message));
-                copy.name = arg.name;
-                return copy;
-            }
-            return arg;
-        });
+        const safeArgs = args.map((arg) => redactArgument(arg));
 
         const entry: LogEntry = { time: Date.now(), level, scope: this.scope, message: safeMessage };
         const target = this.root ?? this;

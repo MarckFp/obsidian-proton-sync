@@ -10,7 +10,10 @@ const STATE_VERSION = 1;
 /**
  * A short tag for the account, so the state file can tell accounts apart
  * without carrying the address in a plain file that every plugin can read.
- * One way: the tag is never turned back into an address.
+ *
+ * Obscured, not one way: a 32-bit FNV hash of an address can be confirmed by
+ * anyone holding a candidate address. It keeps the address out of a file that
+ * is copied into bug reports and read by other plugins; it is not a secret.
  */
 function accountTag(email: string | null): string | null {
     if (!email) {

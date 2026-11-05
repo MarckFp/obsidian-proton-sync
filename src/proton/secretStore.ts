@@ -145,8 +145,12 @@ export class SafeStorageFileSlot implements SecretSlot {
         if (!fs) {
             return;
         }
+        // `fs` resolves a relative path against Obsidian's working directory,
+        // which is not the vault, so the path has to become absolute first.
+        const base = (this.adapter as unknown as { getBasePath?: () => string }).getBasePath?.();
+        const target = base && !this.path.startsWith('/') ? `${base}/${this.path}` : this.path;
         try {
-            fs.chmodSync(this.path, 0o600);
+            fs.chmodSync(target, 0o600);
         } catch {
             // Best effort: a filesystem without modes, or a path the app cannot
             // reach from Node. The permission check reports what it sees.

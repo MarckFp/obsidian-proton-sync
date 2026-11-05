@@ -22,9 +22,9 @@ export type PluginFingerprint = {
     digest: string | null;
     size: number;
     /**
-     * Which credential-facing APIs the bundle mentions, e.g. `secretStorage`.
+     * Which credential-facing APIs the bundle mentions, e.g. `safeStorage`.
      *
-     * Kept so an update that starts reaching for other plugins' secrets can be
+     * Kept so an update that starts reaching for other plugins' objects can be
      * told apart from an update that fixes a typo. Names only; nothing is run.
      */
     touches: string[];
@@ -67,8 +67,15 @@ export type PluginWatchReport = {
     plugins: PluginFingerprint[];
 };
 
-/** The APIs worth noticing when a bundle starts mentioning them. */
-const CAPABILITY_WORDS = ['secretStorage', 'safeStorage', 'plugins.plugins', 'proton-drive-sync'] as const;
+/**
+ * The APIs worth noticing when a bundle starts mentioning them.
+ *
+ * `secretStorage` is deliberately absent: Obsidian recommends it for a plugin's
+ * own API keys, so a plugin adopting it is not a security event, and warning
+ * about it made this alarm untrustworthy. What is left either reaches for other
+ * plugins' objects, or names this plugin.
+ */
+const CAPABILITY_WORDS = ['safeStorage', 'plugins.plugins', 'proton-drive-sync'] as const;
 
 export function capabilitiesIn(bundle: string): string[] {
     return CAPABILITY_WORDS.filter((word) => bundle.includes(word));

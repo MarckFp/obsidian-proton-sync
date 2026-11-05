@@ -34,6 +34,15 @@ export type TripwireReport = {
     /** Set by whoever installed the tripwires, so its own calls are not reported. */
     selfId: string;
     hits: TripwireHit[];
+    /**
+     * Put the shared methods back and take the trap getters off the instance.
+     *
+     * Without this a reload leaves the replacements in place, calling the
+     * *first* instance, and the `Symbol.for` guard then stops the new instance
+     * from installing its own — so its report never sees a hit. Called from
+     * `onunload`; safe to call twice.
+     */
+    uninstall: () => void;
 };
 
 const INSTALLED = Symbol.for('proton-drive-sync.tripwire');
@@ -71,8 +80,9 @@ function stackOf(): string {
 /**
  * Wrap the shared secret-storage methods and add trap getters to `instance`.
  *
- * Idempotent: a second call after a reload reuses the first wiring, so the
- * wrappers never nest.
+ * Idempotent while installed: a second call reuses the first wiring, so the
+ * wrappers never nest. {@link TripwireReport.uninstall} undoes it, and must run
+ * in `onunload` — otherwise a reload keeps calling the old instance's report.
  */
 export function installTripwires(options: {
     app: App;
@@ -85,7 +95,7 @@ export function installTripwires(options: {
 }): TripwireReport {
     const { app, selfId, instance, logger, onHit } = options;
     const traps = options.traps ?? ['session', 'client', 'credentials', 'engine', 'state', 'tokens', 'signIn'];
-    const report: TripwireReport = { selfId, hits: [] };
+    const report: TripwireReport = { selfId, hits: [], uninstall: () => undefined };
 
     const record = (hit: TripwireHit): void => {
         report.hits.push(hit);
@@ -104,13 +114,18 @@ export function installTripwires(options: {
 
     // -- the shared secret storage ----------------------------------------
     const storage = app.secretStorage as unknown as Record<string, unknown> & { [INSTALLED]?: boolean };
+    /** What we took over, so `uninstall` can put it back and only ours. */
+    const originals: [method: string, original: unknown][] = [];
+    let installedByUs = false;
     if (storage && !storage[INSTALLED]) {
         storage[INSTALLED] = true;
+        installedByUs = true;
         for (const method of ['getSecret', 'peekSecret', 'listSecrets']) {
             const original = storage[method];
             if (typeof original !== 'function') {
                 continue;
             }
+            originals.push([method, original]);
             storage[method] = function patched(this: unknown, ...args: unknown[]) {
                 const stack = stackOf();
                 const by = callerPlugin(stack, selfId);
@@ -127,22 +142,52 @@ export function installTripwires(options: {
     }
 
     // -- the plugin instance ----------------------------------------------
+    /** The getters we defined, so `uninstall` removes ours and not a real field. */
+    const trapped: [name: string, getter: () => undefined][] = [];
     for (const name of traps) {
         if (Object.prototype.hasOwnProperty.call(instance, name)) {
             continue;
         }
+        const getter = (): undefined => {
+            const by = callerPlugin(stackOf(), selfId);
+            // Our own modules never read these names any more; anything that
+            // does is either an old build or someone looking for credentials.
+            record({ at: Date.now(), wire: `plugin.${name}`, by });
+            return undefined;
+        };
         Object.defineProperty(instance, name, {
             configurable: true,
             enumerable: false,
-            get() {
-                const by = callerPlugin(stackOf(), selfId);
-                // Our own modules never read these names any more; anything that
-                // does is either an old build or someone looking for credentials.
-                record({ at: Date.now(), wire: `plugin.${name}`, by });
-                return undefined;
-            },
+            get: getter,
         });
+        trapped.push([name, getter]);
     }
 
+    let removed = false;
+    const uninstall = (): void => {
+        if (removed) {
+            return;
+        }
+        removed = true;
+        for (const [method, original] of originals) {
+            storage[method] = original;
+        }
+        originals.length = 0;
+        if (installedByUs) {
+            // A reload must be able to install its own wiring, pointing at the
+            // instance that is now loaded.
+            delete storage[INSTALLED];
+            installedByUs = false;
+        }
+        for (const [name, getter] of trapped) {
+            const descriptor = Object.getOwnPropertyDescriptor(instance, name);
+            if (descriptor?.get === getter) {
+                Reflect.deleteProperty(instance, name);
+            }
+        }
+        trapped.length = 0;
+    };
+
+    report.uninstall = uninstall;
     return report;
 }

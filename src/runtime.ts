@@ -41,6 +41,11 @@ const runtime = {
     selfIntegrity: null as IntegrityResult | null,
     /** Everything that has reached for the sign-in since this start; see security/tripwire.ts. */
     tripwire: null as TripwireReport | null,
+    /**
+     * The synced folder and the folders above it. Read on every start, so the
+     * saved Drive cache is allowed to keep them; see persistentCache.nodeScope.
+     */
+    cacheParents: new Set<string>(),
 };
 
 /** The live runtime. Throws nothing: every field is wired during `onload`. */

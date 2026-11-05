@@ -61,19 +61,50 @@ describe('tripwires on the shared secret storage', () => {
         assert.deepEqual(hits, []);
     });
 
-    it('installs once, even across a reload', () => {
+    it('installs once while loaded, and again after an unload', () => {
         const { app, storage } = fakeApp();
-        const options = {
+        const original = storage.getSecret;
+        const base = {
             app,
             selfId: 'proton-drive-sync',
-            instance: {},
             logger: new Logger('error'),
             onHit: () => {},
         };
-        installTripwires(options);
-        const first = storage.getSecret;
-        installTripwires(options);
-        assert.equal(storage.getSecret, first);
+        const first = installTripwires({ ...base, instance: {} });
+        const patched = storage.getSecret;
+        assert.notEqual(patched, original, 'the shared method is wrapped');
+
+        // A second install while loaded reuses the wiring: wrappers must not nest.
+        installTripwires({ ...base, instance: {} });
+        assert.equal(storage.getSecret, patched);
+
+        first.uninstall();
+        assert.equal(storage.getSecret, original, 'the shared method is restored on unload');
+
+        // Reloading: the instance that is now loaded gets its own wiring, and
+        // an old report's uninstall cannot take it away.
+        const second = installTripwires({ ...base, instance: {} });
+        assert.notEqual(storage.getSecret, original, 'the new instance wraps the method again');
+        first.uninstall();
+        assert.notEqual(storage.getSecret, original, 'the old uninstall leaves the new wiring alone');
+        second.uninstall();
+        assert.equal(storage.getSecret, original);
+    });
+
+    it('takes the trap getters off on unload, so a real field can take the name again', () => {
+        const instance: Record<string, unknown> = {};
+        const report = installTripwires({
+            app: fakeApp().app,
+            selfId: 'proton-drive-sync',
+            instance,
+            logger: new Logger('error'),
+            onHit: () => {},
+        });
+        assert.equal('session' in instance, true);
+        report.uninstall();
+        assert.equal('session' in instance, false);
+        // Idempotent: a second unload is not an error.
+        report.uninstall();
     });
 
     it('puts traps on the names a hostile plugin would try, and keeps them off the instance’s own keys', () => {

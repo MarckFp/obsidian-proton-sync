@@ -180,6 +180,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
                 );
             },
         });
+        // Undone on unload, so a reload installs its own wiring instead of
+        // leaving the wrappers pointing at the instance that went away.
+        this.register(() => runtime.tripwire?.uninstall());
         this.statusBar = new StatusBar(this.addStatusBarItem(), {
             syncNow: () => void this.syncNowOrSetUp(),
             togglePause: () => void this.setPaused(!this.settings.paused),
@@ -264,9 +267,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             protonLogger,
         );
         runtime.session = new ProtonSession(credentials, clientUid, protonLogger, () => runtime.state.cursorsFingerprint());
-        // The metadata cache keeps only nodes the vault syncs; see security/capability.ts
-        // and persistentCache.nodeScope.
-        runtime.session.setNodeSource(() => new Set(runtime.state.entries().map((record) => record.nodeUid)));
+        // The metadata cache keeps only nodes the vault syncs; see
+        // persistentCache.nodeScope.
+        runtime.session.setNodeSource(() => this.cacheScopeNodes());
         runtime.state = new SyncState(
             this.app.vault.adapter,
             this.pluginFile(STATE_FILE),
@@ -322,8 +325,14 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         this.summary = { ...runtime.engine.getSummary(), status: 'connecting' };
         this.settingsTab = new ProtonDriveSyncSettingsTab(this.app, this);
         this.addSettingTab(this.settingsTab);
-        window.setTimeout(() => void this.scanOtherPlugins(), 4000);
-        window.setTimeout(() => void this.checkOwnSecurity(), 5000);
+        // Deferred, and cleared on unload: a plugin disabled in the first ten
+        // seconds should not run either check afterwards.
+        const scanTimer = window.setTimeout(() => void this.scanOtherPlugins(), 4000);
+        const securityTimer = window.setTimeout(() => void this.checkOwnSecurity(), 5000);
+        this.register(() => {
+            window.clearTimeout(scanTimer);
+            window.clearTimeout(securityTimer);
+        });
         this.registerCommands();
         this.registerVaultEvents();
         this.registerLifecycleEvents();
@@ -843,6 +852,52 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             await this.saveSettings();
         }
         await runtime.engine.start(runtime.session.getClient(), this.settings.remoteFolderUid);
+        // The folders above the synced one are read on every start but never
+        // reach the state, so the cache has to be told about them separately.
+        await this.rememberCacheParents(this.settings.remoteFolderUid);
+    }
+
+    /**
+     * The node uids the saved Drive cache may keep entries for.
+     *
+     * The state accounts for every note and folder in the vault. It does not
+     * account for the synced folder itself, the folders above it, or the
+     * `.devices` folder — all read on every start, so all worth keeping. The
+     * files inside `.devices` are admitted by their parent tag rather than by
+     * this set; see `nodeScope`.
+     */
+    private cacheScopeNodes(): Set<string> {
+        const uids = new Set<string>(runtime.state.entries().map((record) => record.nodeUid));
+        for (const uid of runtime.cacheParents) {
+            uids.add(uid);
+        }
+        const devices = this.rememberedDevicesFolder();
+        if (devices !== null) {
+            uids.add(devices);
+        }
+        return uids;
+    }
+
+    /** The synced folder and its parents, so the cache keeps them between starts. */
+    private async rememberCacheParents(rootUid: string | undefined): Promise<void> {
+        const parents = new Set<string>();
+        if (rootUid) {
+            parents.add(rootUid);
+            try {
+                for (const node of await runtime.session.getClient().getNodeHierarchy(rootUid)) {
+                    parents.add(node.uid);
+                }
+            } catch (error) {
+                runtime.logger.debug('Could not list the folders above the synced one', error);
+            }
+        }
+        const devices = this.rememberedDevicesFolder();
+        if (devices !== null) {
+            parents.add(devices);
+        }
+        runtime.cacheParents = parents;
+        // The scope is memoised for a minute; hand it the fuller set now.
+        runtime.session.setNodeSource(() => this.cacheScopeNodes());
     }
 
     /**
@@ -999,6 +1054,12 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             this.notify(requestNotice(request));
         }
         return true;
+    }
+
+    /** The `.devices` folder remembered from last time, if any; read on every start. */
+    private rememberedDevicesFolder(): string | null {
+        const saved = this.app.loadLocalStorage(DEVICES_FOLDER_KEY) as { rootUid?: unknown; uid?: unknown } | null;
+        return typeof saved?.uid === 'string' ? saved.uid : null;
     }
 
     /** Where this vault found the device list's folder last time, for the folder it syncs with. */
