@@ -8,6 +8,7 @@ import type { LogLevel } from '../util/logger';
 import { ConflictsModal } from './conflictsModal';
 import { FolderPickerModal } from './folderPickerModal';
 import { SignInModal } from './signInModal';
+import { uiProof } from '../security/capability';
 
 export const CONFLICT_POLICIES: Record<ConflictPolicy, string> = {
     'keep-both': 'Keep both versions (recommended)',
@@ -170,7 +171,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                             }
                             if (signedIn) {
                                 button.setButtonText('Sign out').onClick(async () => {
-                                    await this.plugin.signOut();
+                                    await this.plugin.signOut(uiProof());
                                     this.update();
                                 });
                                 return;
