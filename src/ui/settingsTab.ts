@@ -523,6 +523,14 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                     control: { type: 'dropdown', key: 'logLevel', options: LOG_LEVELS },
                 },
                 {
+                    name: 'Show note names in the sync log',
+                    desc:
+                        'Off by default: the log is readable by every other plugin, printed to the console, and ' +
+                        'copied into bug reports, so names appear as «file a1b2c3» instead. Turn this on only for a ' +
+                        'report you are about to paste, and off again afterwards.',
+                    control: { type: 'toggle', key: 'logShowsNames' },
+                },
+                {
                     name: 'Rebuild sync state',
                     desc:
                         'Forgets what this device knows about the last sync and compares everything from scratch. ' +
