@@ -6,6 +6,31 @@ import type { ConflictInfo, SyncBase, SyncRecord } from './types';
 
 const STATE_VERSION = 1;
 
+
+/**
+ * A short tag for the account, so the state file can tell accounts apart
+ * without carrying the address in a plain file that every plugin can read.
+ *
+ * Obscured, not one way: a 32-bit FNV hash of an address can be confirmed by
+ * anyone holding a candidate address. It keeps the address out of a file that
+ * is copied into bug reports and read by other plugins; it is not a secret.
+ */
+function accountTag(email: string | null): string | null {
+    if (!email) {
+        return null;
+    }
+    if (!email.includes('@')) {
+        // Already a tag: a file written by this version.
+        return email;
+    }
+    let hash = 2166136261;
+    for (let i = 0; i < email.length; i++) {
+        hash ^= email.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return `tag:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
 type StateFile = {
     version: number;
     /** Account the state belongs to; a different one invalidates every record. */
@@ -114,7 +139,7 @@ export class SyncState {
         this.eventCursors.clear();
         this.retries.clear();
         this.lastFullSyncAt = null;
-        this.accountEmail = accountEmail;
+        this.accountEmail = accountTag(accountEmail);
         this.remoteFolderUid = remoteFolderUid;
 
         this.lost = false;
@@ -146,11 +171,15 @@ export class SyncState {
             this.logger.info(`Discarding sync state written by another version (${file.version})`);
             return;
         }
-        if (file.accountEmail !== accountEmail || file.remoteFolderUid !== remoteFolderUid) {
+        if (accountTag(file.accountEmail) !== this.accountEmail || file.remoteFolderUid !== remoteFolderUid) {
             this.logger.info('Sync state belongs to a different account or folder; starting fresh');
             return;
         }
 
+        if (file.accountEmail !== this.accountEmail) {
+            // Upgrading: the file still holds the address itself.
+            this.dirty = true;
+        }
         for (const [path, record] of Object.entries(file.records ?? {})) {
             this.records.set(path, record);
             this.nodeUidToPath.set(record.nodeUid, path);

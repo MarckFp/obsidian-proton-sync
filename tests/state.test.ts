@@ -132,6 +132,63 @@ describe('SyncState — records', () => {
     });
 });
 
+describe('SyncState — the account tag', () => {
+    it('writes a tag instead of the address, so the file carries no address', async () => {
+        const { state, files } = await loadedState({}, 'ondrej@proton.me');
+        state.setSynced('note.md', 'node-1', 'file', base('hash-a'));
+        await state.flush();
+
+        const written = files.get(FILE) ?? '';
+        assert.equal(written.includes('ondrej@proton.me'), false, written);
+        assert.match(written, /"accountEmail":"tag:[0-9a-f]{8}"/);
+    });
+
+    it('still recognises its own state across a reload', async () => {
+        const { state, files } = await loadedState({}, 'ondrej@proton.me');
+        state.setSynced('note.md', 'node-1', 'file', base('hash-a'));
+        await state.flush();
+
+        const reloaded = new SyncState(memoryAdapterFrom(files), FILE, SILENT);
+        await reloaded.load('ondrej@proton.me', 'folder-1');
+        assert.equal(reloaded.wasLost(), false);
+        assert.equal(reloaded.get('note.md')?.nodeUid, 'node-1');
+    });
+
+    it('rewrites a file an older version left the address in', async () => {
+        const seed = {
+            [FILE]: JSON.stringify({
+                version: 1,
+                accountEmail: 'ondrej@proton.me',
+                remoteFolderUid: 'folder-1',
+                records: { 'note.md': { path: 'note.md', nodeUid: 'node-1', type: 'file' } },
+                conflicts: {},
+                eventCursors: {},
+                retries: {},
+                lastFullSyncAt: null,
+            }),
+        };
+        const { state, files } = await loadedState(seed, 'ondrej@proton.me');
+        // The record survived, so the tag matched; now the file is rewritten.
+        assert.equal(state.get('note.md')?.nodeUid, 'node-1');
+        await state.flush();
+
+        const written = files.get(FILE) ?? '';
+        assert.equal(written.includes('ondrej@proton.me'), false, written);
+        assert.match(written, /"accountEmail":"tag:[0-9a-f]{8}"/);
+    });
+
+    it('still discards state that belongs to another account', async () => {
+        const { state, files } = await loadedState({}, 'ondrej@proton.me');
+        state.setSynced('note.md', 'node-1', 'file', base('hash-a'));
+        await state.flush();
+
+        const reloaded = new SyncState(memoryAdapterFrom(files), FILE, SILENT);
+        await reloaded.load('nekdo@proton.me', 'folder-1');
+        assert.deepEqual(reloaded.paths(), []);
+        assert.equal(reloaded.get('note.md'), undefined);
+    });
+});
+
 describe('SyncState — conflicts', () => {
     it('records a conflict for a path that has no record yet', async () => {
         // The both-created case: neither side has ever been synced, so there is
