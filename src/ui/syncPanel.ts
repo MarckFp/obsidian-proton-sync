@@ -218,10 +218,18 @@ export class SyncPanelView extends ItemView {
             this.detailsEl.createEl('li', { text: line });
         }
 
-        // Locked, the main action is unlocking: that is what "sync now" does
-        // then, and there is nothing to pause.
+        // Locked, the main action is unlocking, and with the Drive folder
+        // gone, choosing another: that is what "sync now" does then. Locked,
+        // there is nothing to pause either.
         const locked = summary.status === 'locked';
-        labelButton(this.syncButton, locked ? 'lock-open' : 'refresh-cw', locked ? 'Unlock' : 'Sync now');
+        const folderMissing = summary.status === 'folder-missing';
+        if (locked) {
+            labelButton(this.syncButton, 'lock-open', 'Unlock');
+        } else if (folderMissing) {
+            labelButton(this.syncButton, 'folder-search', 'Choose folder');
+        } else {
+            labelButton(this.syncButton, 'refresh-cw', 'Sync now');
+        }
         this.pauseButton.buttonEl.toggle(!locked);
 
         const paused = summary.status === 'paused';

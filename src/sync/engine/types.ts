@@ -18,6 +18,12 @@ export type SyncStatus =
     | 'waiting-for-wifi'
     /** The stored sign-in is protected with a PIN that has not been entered yet. Set by the plugin, not the engine. */
     | 'locked'
+    /**
+     * The Drive folder the vault syncs with is in Drive's trash, deleted, or
+     * no longer shared with this account. Nothing syncs until it is back or
+     * another folder is chosen.
+     */
+    | 'folder-missing'
     /** Restoring the stored sign-in and getting ready to sync, at start. Set by the plugin, not the engine. */
     | 'connecting';
 
