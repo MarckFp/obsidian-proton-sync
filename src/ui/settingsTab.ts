@@ -8,6 +8,7 @@ import type { LogLevel } from '../util/logger';
 import { ConflictsModal } from './conflictsModal';
 import { FolderPickerModal } from './folderPickerModal';
 import { SignInModal } from './signInModal';
+import { getRuntime } from '../runtime';
 
 export const CONFLICT_POLICIES: Record<ConflictPolicy, string> = {
     'keep-both': 'Keep both versions (recommended)',
@@ -140,9 +141,9 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
     // -- account -----------------------------------------------------------
 
     private accountGroup(): SettingDefinitionItem {
-        const signedIn = this.plugin.session.isSignedIn();
+        const signedIn = getRuntime().session.isSignedIn();
         const locked = this.plugin.locked;
-        const email = this.plugin.session.accountEmail;
+        const email = getRuntime().session.accountEmail;
 
         return {
             type: 'group',
@@ -255,15 +256,15 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                             button
                                 .setButtonText(remoteFolderUid ? 'Change' : 'Choose')
                                 .setCta()
-                                .setDisabled(!this.plugin.session.isSignedIn())
+                                .setDisabled(!getRuntime().session.isSignedIn())
                                 .onClick(() => {
-                                    if (!this.plugin.session.isSignedIn()) {
+                                    if (!getRuntime().session.isSignedIn()) {
                                         new Notice('Sign in first.');
                                         return;
                                     }
-                                    new FolderPickerModal(this.app, this.plugin.session.getClient(), (folder) => {
+                                    new FolderPickerModal(this.app, getRuntime().session.getClient(), (folder) => {
                                         void this.plugin.setRemoteFolder(folder).then(() => this.update());
-                                    }, this.plugin.logger.getLogger('folder-picker')).open();
+                                    }, getRuntime().logger.getLogger('folder-picker')).open();
                                 }),
                         );
                     },
@@ -342,7 +343,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                                     new Notice('Proton Drive Sync: sign in and choose a Drive folder first.');
                                     return;
                                 }
-                                await this.plugin.engine.syncNow();
+                                await getRuntime().engine.syncNow();
                                 new Notice('Proton Drive Sync: finished.');
                             }),
                         );
@@ -380,7 +381,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
 
     private conflictsGroup(): SettingDefinitionItem {
         const policy = this.plugin.settings.conflictPolicy;
-        const conflicts = this.plugin.state.conflicts().length;
+        const conflicts = getRuntime().state.conflicts().length;
 
         return {
             type: 'group',
@@ -564,7 +565,7 @@ export class ProtonDriveSyncSettingsTab extends PluginSettingTab {
                         // has the card's full width on a narrow screen.
                         setting.settingEl.addClass('proton-drive-sync-log-setting');
                         const log = setting.settingEl.createEl('pre', { cls: 'proton-drive-sync-log' });
-                        const entries = this.plugin.logger.getEntries().slice(-50);
+                        const entries = getRuntime().logger.getEntries().slice(-50);
                         log.setText(
                             entries.length === 0
                                 ? 'Nothing logged yet.'

@@ -6,6 +6,7 @@ import { isTextPath } from '../sync/media';
 import type { ConflictInfo, ConflictReason } from '../sync/types';
 import { compareWithConflictCopy, compareWithDrive } from './compare';
 import { outcomeText, REASON_TEXT } from './conflictText';
+import { getRuntime } from '../runtime';
 
 const PENDING_REASON_TEXT: Record<ConflictReason, string> = {
     'both-modified': 'Edited here and on another device since the last sync.',
@@ -52,7 +53,7 @@ export class ConflictsModal extends Modal {
     // -- waiting on a decision ---------------------------------------------
 
     private renderPending(container: HTMLElement): void {
-        const conflicts = this.plugin.state.conflicts();
+        const conflicts = getRuntime().state.conflicts();
         if (conflicts.length === 0) {
             return;
         }
@@ -96,7 +97,7 @@ export class ConflictsModal extends Modal {
     /** Apply one decision, to this file only; see `SyncEngine.resolveConflict`. */
     private async resolve(path: string, policy: 'keep-both' | 'prefer-local' | 'prefer-remote'): Promise<void> {
         try {
-            await this.plugin.engine.resolveConflict(path, policy);
+            await getRuntime().engine.resolveConflict(path, policy);
             new Notice(`Resolved "${path}".`);
         } catch (error) {
             new Notice(`Could not resolve "${path}": ${error instanceof Error ? error.message : String(error)}`);
@@ -108,7 +109,7 @@ export class ConflictsModal extends Modal {
     // -- history -----------------------------------------------------------
 
     private renderHistory(container: HTMLElement): void {
-        const history = this.plugin.conflictHistory;
+        const history = getRuntime().conflictHistory;
         const records = history.entries();
 
         const heading = new Setting(container).setName('History').setHeading();
@@ -125,7 +126,7 @@ export class ConflictsModal extends Modal {
             container.createEl('p', {
                 cls: 'proton-drive-sync-muted',
                 text:
-                    this.plugin.state.conflicts().length === 0
+                    getRuntime().state.conflicts().length === 0
                         ? 'No conflicts yet. Any that happen are listed here, however they were settled.'
                         : 'No settled conflicts yet.',
             });
@@ -180,7 +181,7 @@ export class ConflictsModal extends Modal {
                 .setIcon('x')
                 .setTooltip('Remove from history')
                 .onClick(async () => {
-                    await this.plugin.conflictHistory.remove(record);
+                    await getRuntime().conflictHistory.remove(record);
                     this.render();
                 }),
         );
