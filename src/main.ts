@@ -29,7 +29,7 @@ import { DriveIO, sharedWithOthers } from './sync/drive';
 import { SyncEngine, type ConflictEvent, type OpenEditor, type SyncPlan, type SyncSummary } from './sync/engine';
 import { errorMessage } from './sync/engine/helpers';
 import { SyncState } from './sync/state';
-import { formatLogEntries, Logger } from './util/logger';
+import { formatLogEntries, Logger, setLogShowsNames } from './util/logger';
 import { compareConflictCopyOf, compareWithConflictCopy, conflictPairsFor, versionComparison } from './ui/compare';
 import { showConflictNotice } from './ui/conflictNotice';
 import { ConflictsModal } from './ui/conflictsModal';
@@ -138,6 +138,7 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         await this.loadSettings();
 
         this.logger = new Logger(this.settings.logLevel);
+        setLogShowsNames(this.settings.logShowsNames ?? false);
         this.statusBar = new StatusBar(this.addStatusBarItem(), {
             syncNow: () => void this.syncNowOrSetUp(),
             togglePause: () => void this.setPaused(!this.settings.paused),
@@ -885,6 +886,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     async saveSettings(): Promise<void> {
         await this.saveData(this.settings);
         this.logger.setLevel(this.settings.logLevel);
+        // Read when the log line is written, so the toggle takes effect at once.
+        setLogShowsNames(this.settings.logShowsNames ?? false);
         this.engine.updateSettings(this.settings);
         // The device name may have changed, which the device list shows.
         this.devices.noteChange();
