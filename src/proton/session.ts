@@ -9,6 +9,7 @@ import {
 } from '@protontech/drive-sdk';
 import type { Logger } from '../util/logger';
 import { ApiClient, initAccount, type Addresses, type Auth, type Srp } from './account';
+import { withAccountRetry } from './accountRetry';
 import type { Credentials } from './credentials';
 import { HTTPClient } from './httpClient';
 import { cacheKeyBytes, EncryptedEntitiesCache, IndexedDbCacheStore } from './persistentCache';
@@ -30,6 +31,9 @@ const AUTH_CLIENT_ID = 'external-drive';
 
 const DRIVE_API_URL = 'drive-api.proton.me';
 const ACCOUNT_URL = 'account.proton.me';
+
+/** Waits between attempts to reach Proton right after a sign-in is approved: about a minute in all. */
+const ACCOUNT_RETRY_WAITS_MS = [2_000, 4_000, 8_000, 15_000, 30_000];
 
 let cryptoEndpointReady = false;
 
@@ -53,8 +57,13 @@ function initCryptoOnce(): OpenPGPCryptoWithCryptoProxy {
 export type SignInHandle = {
     /** The account.proton.me URL the user has to open to approve the session. */
     url: string;
-    /** Resolves with the signed-in address once the user approves, or rejects. */
-    completion: Promise<string>;
+    /**
+     * Resolves once the user approves: with the signed-in address, or with
+     * undefined when Proton could not be reached to fetch it, in which case
+     * the sign-in still stands and the address is fetched later. Rejects when
+     * the sign-in itself fails.
+     */
+    completion: Promise<string | undefined>;
 };
 
 /**
@@ -188,12 +197,10 @@ export class ProtonSession {
             .authViaWeb((signInUrl) => resolveUrl(signInUrl), signal)
             .then(async () => {
                 onApproved?.();
+                // The session is saved by now: from here a failure to reach
+                // Proton delays the setup, it does not undo the sign-in.
                 await this.buildClient(initCryptoOnce());
-
-                const primary = await this.addresses!.getOwnPrimaryAddress();
-                await this.credentials.setAccountEmail(primary.email);
-                this.logger.info(`Signed in to Proton as ${primary.email}`);
-                return primary.email;
+                return this.ensureAccountEmail({ patient: true });
             });
 
         // A failure before the URL is known - the fork request itself being
@@ -203,6 +210,38 @@ export class ProtonSession {
 
         const signInUrl = await url;
         return { url: signInUrl, completion };
+    }
+
+    /**
+     * The signed-in address, fetched and stored if it is not yet known.
+     *
+     * Fetched right after the sign-in is approved, which on Android is just
+     * as the app comes back from the background, often still without a
+     * network. `patient` keeps trying for about a minute then. Resolves
+     * undefined when Proton still cannot be reached: the session stays saved,
+     * and the plugin fetches it when it next connects.
+     */
+    async ensureAccountEmail({ patient = false }: { patient?: boolean } = {}): Promise<string | undefined> {
+        const known = this.credentials.accountEmail;
+        if (known) {
+            return known;
+        }
+        const addresses = this.addresses;
+        if (!addresses) {
+            throw new Error('Proton session is not initialised');
+        }
+        const primary = await withAccountRetry(
+            () => addresses.getOwnPrimaryAddress(),
+            patient ? ACCOUNT_RETRY_WAITS_MS : [],
+            this.logger,
+            'the account address, to finish signing in',
+        );
+        if (!primary) {
+            return undefined;
+        }
+        await this.credentials.setAccountEmail(primary.email);
+        this.logger.info(`Signed in to Proton as ${primary.email}`);
+        return primary.email;
     }
 
     /**

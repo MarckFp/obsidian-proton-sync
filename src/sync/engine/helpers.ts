@@ -92,6 +92,14 @@ export function isOffline(error: unknown): boolean {
         message.includes('failed to fetch') ||
         message.includes('enotfound') ||
         message.includes('econnrefused') ||
-        message.includes('timeout')
+        message.includes('timeout') ||
+        // Android passes on Java's own exceptions: a host that will not
+        // resolve or a connection cut while the app was in the background.
+        message.includes('unknownhostexception') ||
+        message.includes('unable to resolve host') ||
+        message.includes('connectexception') ||
+        message.includes('failed to connect') ||
+        message.includes('connection abort') ||
+        message.includes('connection reset')
     );
 }
