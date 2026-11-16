@@ -1,3 +1,4 @@
+import { assertProtonUrl } from '../endpoints';
 /**
  * A minimal HTTP client for the account module, in place of `ky`.
  *
@@ -90,8 +91,14 @@ export function createHttpClient(config: ClientConfig): HttpClient {
     const call = <T>(url: string, options: RequestOptions = {}): ResponsePromise<T> => {
         let acceptJson = false;
         // Sent on the next microtask, so a `.json()` chained straight onto the
-        // call can still ask for JSON first. ky does the same.
-        const response = Promise.resolve().then(() => send(config, url, options, acceptJson)) as ResponsePromise<T>;
+        // call can still ask for JSON first. ky does the same. The host guard
+        // sits in there too: one choke point for every request the plugin
+        // makes, and a refusal is a rejection rather than a throw at the call.
+        const response = Promise.resolve()
+            .then(() => {
+                assertProtonUrl(url);
+                return send(config, url, options, acceptJson);
+            }) as ResponsePromise<T>;
         response.json = async <J = T>() => {
             acceptJson = true;
             const result = await response;

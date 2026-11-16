@@ -51,11 +51,11 @@ describe('createHttpClient', () => {
     it('sends JSON, query parameters and default headers, and parses the reply', async () => {
         const { http, sent } = client([json({ Code: 1000 })]);
         const result = await http
-            .post<{ Code: number }>('https://api.test/core/v4/auth', { json: { a: 1 }, searchParams: { Page: 0 } })
+            .post<{ Code: number }>('https://drive-api.proton.me/core/v4/auth', { json: { a: 1 }, searchParams: { Page: 0 } })
             .json();
 
         assert.deepEqual(result, { Code: 1000 });
-        assert.equal(sent[0].url, 'https://api.test/core/v4/auth?Page=0');
+        assert.equal(sent[0].url, 'https://drive-api.proton.me/core/v4/auth?Page=0');
         assert.equal(sent[0].method, 'POST');
         assert.equal(sent[0].body, '{"a":1}');
         assert.equal(sent[0].headers.get('content-type'), 'application/json');
@@ -65,52 +65,52 @@ describe('createHttpClient', () => {
 
     it('throws HTTPError for a failed request, unless told not to', async () => {
         const { http } = client([json({ Code: 2501 }, 404), json({ Code: 2501 }, 404)]);
-        await assert.rejects(http.get('https://api.test/x').json(), (error: unknown) => {
+        await assert.rejects(http.get('https://drive-api.proton.me/x').json(), (error: unknown) => {
             assert.ok(error instanceof HTTPError);
             assert.equal(error.response.status, 404);
             return true;
         });
-        const response = await http('https://api.test/x', { throwHttpErrors: false });
+        const response = await http('https://drive-api.proton.me/x', { throwHttpErrors: false });
         assert.equal(response.status, 404);
     });
 
     it('retries a GET that hit a rate limit, waiting as long as Retry-After says', async () => {
         const { http, sent } = client([json({}, 429, { 'retry-after': '0' }), json({ ok: true })]);
-        assert.deepEqual(await http.get('https://api.test/x').json(), { ok: true });
+        assert.deepEqual(await http.get('https://drive-api.proton.me/x').json(), { ok: true });
         assert.equal(sent.length, 2);
     });
 
     it('does not retry a POST, which may not be safe to repeat', async () => {
         const { http, sent } = client([json({}, 503, { 'retry-after': '0' })]);
-        await assert.rejects(http.post('https://api.test/x').json(), HTTPError);
+        await assert.rejects(http.post('https://drive-api.proton.me/x').json(), HTTPError);
         assert.equal(sent.length, 1);
     });
 
     it('does not retry a 413 that gives no Retry-After', async () => {
         const { http, sent } = client([json({}, 413)]);
-        await assert.rejects(http.get('https://api.test/x').json(), HTTPError);
+        await assert.rejects(http.get('https://drive-api.proton.me/x').json(), HTTPError);
         assert.equal(sent.length, 1);
     });
 
     it('retries a GET after a network error, but not when retries are off', async () => {
         const retried = client([new TypeError('Failed to fetch'), json({ ok: true })]);
-        assert.deepEqual(await retried.http.get('https://api.test/x').json(), { ok: true });
+        assert.deepEqual(await retried.http.get('https://drive-api.proton.me/x').json(), { ok: true });
         assert.equal(retried.sent.length, 2);
 
         const single = client([new TypeError('Failed to fetch')]);
-        await assert.rejects(single.http('https://api.test/x', { retry: false }), /Failed to fetch/);
+        await assert.rejects(single.http('https://drive-api.proton.me/x', { retry: false }), /Failed to fetch/);
         assert.equal(single.sent.length, 1);
     });
 
     it('fails with a TimeoutError, the name the Drive SDK retries on', async () => {
         const { http } = client(['hang']);
-        await assert.rejects(http('https://api.test/x', { timeout: 20 }), { name: 'TimeoutError' });
+        await assert.rejects(http('https://drive-api.proton.me/x', { timeout: 20 }), { name: 'TimeoutError' });
     });
 
     it('fails with an AbortError when the signal fires', async () => {
         const { http } = client(['hang']);
         const controller = new AbortController();
-        const pending = http('https://api.test/x', { signal: controller.signal });
+        const pending = http('https://drive-api.proton.me/x', { signal: controller.signal });
         controller.abort();
         await assert.rejects(pending, { name: 'AbortError' });
     });
@@ -157,7 +157,7 @@ describe('ApiClient session refresh', () => {
             return request.headers.get('authorization') === 'Bearer new' ? json({ User: 'me' }) : json({}, 401);
         });
         const api = new ApiClient({
-            baseUrl: 'api.test',
+            baseUrl: 'drive-api.proton.me',
             appVersion: 'test',
             credentials,
             logger: new Logger('error'),
@@ -169,7 +169,7 @@ describe('ApiClient session refresh', () => {
         assert.equal(credentials.accessToken, 'new');
         assert.equal(credentials.refreshToken, 'refresh-2');
         assert.deepEqual(
-            transport.sent.map((request) => request.url.replace('https://api.test', '')),
+            transport.sent.map((request) => request.url.replace('https://drive-api.proton.me', '')),
             ['/core/v4/users', '/auth/v4/refresh', '/core/v4/users'],
         );
     });
@@ -180,7 +180,7 @@ describe('ApiClient session refresh', () => {
             request.url.endsWith('/auth/v4/refresh') ? refreshReply() : json({}, 401),
         );
         const api = new ApiClient({
-            baseUrl: 'api.test',
+            baseUrl: 'drive-api.proton.me',
             appVersion: 'test',
             credentials,
             logger: new Logger('error'),
@@ -200,7 +200,7 @@ describe('ApiClient session refresh', () => {
             request.url.endsWith('/auth/v4/refresh') ? json({ Code: 10013 }, 400) : json({}, 401),
         );
         const api = new ApiClient({
-            baseUrl: 'api.test',
+            baseUrl: 'drive-api.proton.me',
             appVersion: 'test',
             credentials,
             logger: new Logger('error'),
@@ -216,7 +216,7 @@ describe('revokeSession', () => {
     function api(reply: (request: Sent) => Reply) {
         const transport = scriptedFetch(reply);
         const client = new ApiClient({
-            baseUrl: 'api.test',
+            baseUrl: 'drive-api.proton.me',
             appVersion: 'test',
             credentials: new FakeCredentials(),
             logger: new Logger('error'),
@@ -229,7 +229,7 @@ describe('revokeSession', () => {
         const { client, sent } = api(() => json({ Code: 1000 }));
         assert.equal(await revokeSession(client, new Logger('error')), true);
         assert.equal(sent[0].method, 'DELETE');
-        assert.equal(sent[0].url, 'https://api.test/auth/v4');
+        assert.equal(sent[0].url, 'https://drive-api.proton.me/auth/v4');
         assert.equal(sent[0].headers.get('authorization'), 'Bearer old');
         assert.equal(sent[0].headers.get('x-pm-uid'), 'uid-1');
     });
