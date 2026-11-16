@@ -84,7 +84,12 @@ export class SignInModal extends Modal {
         try {
             const email = await handle.completion;
             this.finished = true;
-            new Notice(`Signed in to Proton Drive as ${email}.`);
+            new Notice(
+                email
+                    ? `Signed in to Proton Drive as ${email}.`
+                    : 'Signed in to Proton Drive. Proton could not be reached to finish setting up; ' +
+                          'that happens by itself once the connection is back.',
+            );
             this.onSignedIn();
             this.close();
         } catch (error) {

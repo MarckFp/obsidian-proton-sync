@@ -53,6 +53,13 @@ Vendored from commit `6cbf2f442079ded7fadf93dc59494e71e04f19bb` (2026-09-15).
   otherwise a wrapper) and schedules through `window.setTimeout` for Obsidian's
   popout windows. Marked `LOCAL CHANGE` in the file.
 
+- `auth.ts` keeps polling for the sign-in approval through a failure that
+  never got an answer from Proton (no network, a host that would not
+  resolve, a timeout, or a 408/429/5xx), until the usual ten-minute limit.
+  On Android the app is often cut off from the network while the user
+  approves in the browser, and one failed check used to end the sign-in.
+  The rule is in the new `transient.ts`. Marked `LOCAL CHANGE` in `auth.ts`.
+
 Every other runtime file is byte-identical to upstream.
 
 ## Re-vendoring

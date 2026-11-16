@@ -66,6 +66,8 @@ const CONFLICT_NOTICE_DELAY_MS = 1500;
 
 /** How often the status bar's "synced 5m ago" is brought up to date. */
 const STATUS_REFRESH_MS = 30_000;
+/** How soon to try again to finish a sign-in Proton could not be reached for. */
+const RECONNECT_AFTER_MS = 60_000;
 
 /**
  * How often a paused device checks the device list for a request, such as
@@ -135,6 +137,8 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     private summary!: SyncSummary;
     private pendingConflicts: ConflictEvent[] = [];
     private conflictNoticeTimer: number | null = null;
+    /** A pending {@link reconnectLater}. */
+    private reconnectTimer: number | null = null;
 
     override async onload(): Promise<void> {
         await this.loadSettings();
@@ -281,6 +285,9 @@ export default class ProtonDriveSyncPlugin extends Plugin {
     override onunload(): void {
         if (this.conflictNoticeTimer !== null) {
             window.clearTimeout(this.conflictNoticeTimer);
+        }
+        if (this.reconnectTimer !== null) {
+            window.clearTimeout(this.reconnectTimer);
         }
         // Obsidian does not wait for unload, so there is nothing to hand the
         // promise to; `stop` cancels timers synchronously before it awaits.
@@ -631,6 +638,19 @@ export default class ProtonDriveSyncPlugin extends Plugin {
             return;
         }
 
+        // The state is keyed by the account, so its address has to be known
+        // first. It is missing only after a sign-in Proton could not be
+        // reached to finish, typically on Android, coming back from the
+        // browser without a network yet.
+        if ((await this.session.ensureAccountEmail()) === undefined) {
+            this.showStatus({
+                ...this.engine.getSummary(),
+                status: 'offline',
+                lastError: 'Signed in, but Proton could not be reached to finish setting up; trying again shortly',
+            });
+            this.reconnectLater();
+            return;
+        }
         await this.state.load(this.session.accountEmail ?? null, this.settings.remoteFolderUid);
         if (this.state.wasLost() || this.state.paths().length === 0) {
             // A sync starting from nothing must not trust anything cached
@@ -751,6 +771,17 @@ export default class ProtonDriveSyncPlugin extends Plugin {
         const setting = (this.app as App & { setting?: { open(): void; openTabById(id: string): void } }).setting;
         setting?.open();
         setting?.openTabById(this.manifest.id);
+    }
+
+    /** Try {@link reconnect} again in a while, once; a second call while one is waiting changes nothing. */
+    private reconnectLater(): void {
+        if (this.reconnectTimer !== null) {
+            return;
+        }
+        this.reconnectTimer = window.setTimeout(() => {
+            this.reconnectTimer = null;
+            void this.reconnect();
+        }, RECONNECT_AFTER_MS);
     }
 
     /** Tear the sync down and bring it back with the current configuration. */

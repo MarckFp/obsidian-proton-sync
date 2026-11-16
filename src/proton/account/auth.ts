@@ -12,6 +12,7 @@ import type { SessionCredentials } from './sessionCredentials';
 import { sleepMs } from './sleep';
 import type { Srp } from './srp';
 import { fetchTelemetryEnabled } from './telemetryPreference';
+import { isTransientAccountError } from './transient';
 
 export class Auth {
     constructor(
@@ -147,6 +148,17 @@ export class Auth {
                 if (error instanceof AccountApiError && error.httpCode === 422) {
                     const debug = error.debug as { Error?: string };
                     this.logger.debug(`Authentication not yet ready (${error.code}: ${debug.Error})`);
+                    await sleepMs(FORK_POLL_INTERVAL_MS, signal);
+                    continue;
+                }
+                // LOCAL CHANGE (not upstream): keep polling through a failure
+                // with no answer from Proton, until the time limit above. On
+                // Android the app is often cut off from the network while the
+                // user approves in the browser, and one failed check used to
+                // end a sign-in that was about to succeed.
+                if (isTransientAccountError(error)) {
+                    const reason = error instanceof Error ? error.message : String(error);
+                    this.logger.debug(`Could not check the sign-in yet; trying again (${reason})`);
                     await sleepMs(FORK_POLL_INTERVAL_MS, signal);
                     continue;
                 }
